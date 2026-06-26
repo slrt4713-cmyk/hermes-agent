@@ -9,8 +9,10 @@ We mock the telegram module at import time to avoid collection errors.
 """
 
 import asyncio
+import io
 import os
 import sys
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -187,6 +189,13 @@ def _make_photo(file_obj=None):
 
 
 class TestDocumentDownloadBlock:
+    @pytest.fixture(autouse=True)
+    def _run_document_extraction_inline(self, monkeypatch):
+        async def run_inline(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("plugins.platforms.telegram.adapter.asyncio.to_thread", run_inline)
+
     @pytest.mark.asyncio
     async def test_supported_pdf_is_cached(self, adapter):
         pdf_bytes = b"%PDF-1.4 fake"
@@ -231,6 +240,50 @@ class TestDocumentDownloadBlock:
         await adapter._handle_media_message(update, MagicMock())
         event = adapter.handle_message.call_args[0][0]
         assert "# Title" in event.text
+
+    @pytest.mark.asyncio
+    async def test_supported_json_injects_content(self, adapter):
+        content = b'{"company":"Simon","status":"setup"}'
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="config.json", mime_type="application/json",
+            file_size=len(content), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert '"company":"Simon"' in event.text
+        assert "[Content of config.json]" in event.text
+
+    @pytest.mark.asyncio
+    async def test_supported_docx_injects_extracted_content(self, adapter):
+        docx_buffer = io.BytesIO()
+        with zipfile.ZipFile(docx_buffer, "w") as archive:
+            archive.writestr(
+                "word/document.xml",
+                """
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                    <w:body><w:p><w:r><w:t>Hermes setup for Simon</w:t></w:r></w:p></w:body>
+                </w:document>
+                """,
+            )
+        content = docx_buffer.getvalue()
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="simon.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            file_size=len(content),
+            file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert "Hermes setup for Simon" in event.text
+        assert "[Content of simon.docx]" in event.text
 
     @pytest.mark.asyncio
     async def test_caption_preserved_with_injection(self, adapter):

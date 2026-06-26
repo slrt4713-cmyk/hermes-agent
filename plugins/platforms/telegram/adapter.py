@@ -80,9 +80,9 @@ from gateway.platforms.base import (
     SUPPORTED_VIDEO_TYPES,
     SUPPORTED_DOCUMENT_TYPES,
     SUPPORTED_IMAGE_DOCUMENT_TYPES,
-    _TEXT_INJECT_EXTENSIONS,
     utf16_len,
 )
+from gateway.document_extraction import build_inline_document_text
 from plugins.platforms.telegram.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -6817,27 +6817,18 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_types = [mime_type]
                 logger.info("[Telegram] Cached user document at %s (%s)", cached_path, mime_type)
 
-                # For text-readable files, inject content into event.text (capped
-                # at 100 KB). Gate on a text-like extension/MIME — NOT a blind
-                # UTF-8 decode, since binary formats (PDF/zip/docx) can have
-                # decodable ASCII headers. Binary files are surfaced as a cached
-                # path only (run.py emits a path-pointing context note).
-                MAX_TEXT_INJECT_BYTES = 100 * 1024
-                _is_text = ext in _TEXT_INJECT_EXTENSIONS or (doc_mime or "").startswith("text/")
-                if _is_text and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
-                    try:
-                        text_content = raw_bytes.decode("utf-8")
-                        display_name = original_filename or f"document{ext or '.txt'}"
-                        display_name = re.sub(r'[^\w.\- ]', '_', display_name)
-                        injection = f"[Content of {display_name}]:\n{text_content}"
-                        if event.text:
-                            event.text = f"{injection}\n\n{event.text}"
-                        else:
-                            event.text = injection
-                    except UnicodeDecodeError:
-                        # Binary file — agent has the cached path and can use
-                        # terminal/read_file against it. No inline injection.
-                        pass
+                injection = await asyncio.to_thread(
+                    build_inline_document_text,
+                    cached_path=cached_path,
+                    ext=ext,
+                    display_name=original_filename or f"document{ext or '.bin'}",
+                    raw_bytes=raw_bytes,
+                )
+                if injection:
+                    if event.text:
+                        event.text = f"{injection}\n\n{event.text}"
+                    else:
+                        event.text = injection
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
