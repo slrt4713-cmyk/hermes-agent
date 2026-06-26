@@ -2,7 +2,7 @@
 """
 Tests for structured-document extraction in the read_file tool.
 
-Covers .ipynb / .docx / .xlsx extraction (ported from Kilo-Org/kilocode
+Covers .ipynb / .docx / .xlsx / .pptx / .pdf extraction (ported from Kilo-Org/kilocode
 #10733, #10737, #10740) and the read_file_tool integration: pagination,
 line-numbering, graceful fallback on malformed input, and hidden-sheet
 omission.
@@ -15,6 +15,8 @@ import os
 import tempfile
 import unittest
 import zipfile
+from types import SimpleNamespace
+from unittest import mock
 
 from tools.read_extract import (
     ExtractionError,
@@ -51,8 +53,16 @@ def _write_xlsx(path, *, workbook, rels, shared, sheets):
             z.writestr(part, xml)
 
 
+def _write_pptx(path, slide_xmls):
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        for index, slide_xml in enumerate(slide_xmls, start=1):
+            z.writestr(f"ppt/slides/slide{index}.xml", slide_xml)
+
+
 _NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _NS_S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +74,11 @@ class TestIsExtractable(unittest.TestCase):
         self.assertTrue(is_extractable_document("a.ipynb"))
         self.assertTrue(is_extractable_document("/x/B.DOCX"))
         self.assertTrue(is_extractable_document("report.xlsx"))
+        self.assertTrue(is_extractable_document("deck.pptx"))
+        self.assertTrue(is_extractable_document("paper.pdf"))
 
     def test_unrecognized_extensions(self):
         self.assertFalse(is_extractable_document("a.py"))
-        self.assertFalse(is_extractable_document("a.pdf"))
         self.assertFalse(is_extractable_document("a.txt"))
 
 
@@ -234,6 +245,74 @@ class TestXlsxExtraction(unittest.TestCase):
         p = os.path.join(self.tmp, "bad.xlsx")
         with open(p, "wb") as fh:
             fh.write(b"nope")
+        with self.assertRaises(ExtractionError):
+            extract_document_text(p)
+
+
+# ---------------------------------------------------------------------------
+# PowerPoint decks (.pptx)
+# ---------------------------------------------------------------------------
+
+class TestPptxExtraction(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rex_pptx_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _slide(self, text):
+        return (
+            f'<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+            f'xmlns:a="{_NS_A}"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t>'
+            '</a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>'
+        )
+
+    def test_slide_text_in_order(self):
+        p = os.path.join(self.tmp, "deck.pptx")
+        _write_pptx(p, [self._slide("Intro"), self._slide("Pipeline update")])
+        text = extract_document_text(p)
+        self.assertIn("# -- Slide 1 --", text)
+        self.assertIn("Intro", text)
+        self.assertIn("Pipeline update", text)
+        self.assertLess(text.index("Intro"), text.index("Pipeline update"))
+
+    def test_not_a_zip_raises(self):
+        p = os.path.join(self.tmp, "bad.pptx")
+        with open(p, "wb") as fh:
+            fh.write(b"nope")
+        with self.assertRaises(ExtractionError):
+            extract_document_text(p)
+
+
+# ---------------------------------------------------------------------------
+# PDFs via pdftotext
+# ---------------------------------------------------------------------------
+
+class TestPdfExtraction(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rex_pdf_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @mock.patch("tools.read_extract.shutil.which", return_value="/usr/bin/pdftotext")
+    @mock.patch("tools.read_extract.subprocess.run")
+    def test_pdf_uses_pdftotext(self, run_mock, _which_mock):
+        p = os.path.join(self.tmp, "report.pdf")
+        with open(p, "wb") as fh:
+            fh.write(b"%PDF fake")
+        run_mock.return_value = SimpleNamespace(returncode=0, stdout="PDF body\n", stderr="")
+        text = extract_document_text(p)
+        self.assertEqual(text, "PDF body\n")
+        self.assertIn("-layout", run_mock.call_args.args[0])
+
+    @mock.patch("tools.read_extract.shutil.which", return_value=None)
+    def test_missing_pdftotext_raises(self, _which_mock):
+        p = os.path.join(self.tmp, "report.pdf")
+        with open(p, "wb") as fh:
+            fh.write(b"%PDF fake")
         with self.assertRaises(ExtractionError):
             extract_document_text(p)
 

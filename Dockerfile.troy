@@ -1,0 +1,47 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        build-essential \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        gcc \
+        git \
+        libffi-dev \
+        nodejs \
+        npm \
+        poppler-utils \
+        procps \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 1000 hermes-troy \
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash hermes-troy
+
+WORKDIR /opt/hermes
+COPY . /opt/hermes
+
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install -e '.[messaging,cron,mcp,pty,cli]' \
+    && python -m pip install \
+        sibyl-memory-client==0.4.14 \
+        sibyl-memory-mcp==0.1.10 \
+        sibyl-memory-hermes==0.3.10 \
+        sibyl-memory-cli==0.3.16
+
+RUN npm install -g @softeria/ms-365-mcp-server@0.75.0
+
+ENV HOME=/home/hermes-troy
+ENV HERMES_HOME=/home/hermes-troy/.hermes
+ENV PATH=/home/hermes-troy/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+USER hermes-troy
+WORKDIR /opt/hermes-troy
+
+CMD ["sleep", "infinity"]

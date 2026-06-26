@@ -1141,9 +1141,13 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".ppt": "application/vnd.ms-powerpoint",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ipynb": "application/x-ipynb+json",
     ".ts": "text/plain",
+    ".js": "text/plain",
     ".py": "text/plain",
     ".sh": "text/plain",
+    ".html": "text/html",
+    ".css": "text/css",
 }
 
 

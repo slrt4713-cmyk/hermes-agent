@@ -104,6 +104,27 @@ _TELEGRAM_IMAGE_EXT_TO_MIME = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+_MAX_TEXT_DOCUMENT_INJECT_BYTES = 100 * 1024
+_TEXT_DOCUMENT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".log",
+    ".json",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".ts",
+    ".js",
+    ".py",
+    ".sh",
+    ".html",
+    ".css",
+}
+_EXTRACTABLE_DOCUMENT_EXTENSIONS = {".docx", ".xlsx", ".pptx", ".pdf", ".ipynb"}
 
 
 MAX_COMMANDS_PER_SCOPE = 30
@@ -194,6 +215,16 @@ def _strip_mdv2(text: str) -> str:
     # Remove MarkdownV2 spoiler markers (||text|| → text)
     cleaned = re.sub(r'\|\|([^|]+)\|\|', r'\1', cleaned)
     return cleaned
+
+
+def _safe_document_display_name(filename: str, ext: str) -> str:
+    display_name = filename or f"document{ext}"
+    return re.sub(r'[^\w.\- ]', '_', display_name)
+
+
+def _prepend_document_content(existing_text: str, display_name: str, content: str) -> str:
+    injection = f"[Content of {display_name}]:\n{content}"
+    return f"{injection}\n\n{existing_text}" if existing_text else injection
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +436,38 @@ class TelegramAdapter(BasePlatformAdapter):
         if max_value is not None:
             value = min(value, max_value)
         return value
+
+    def _configured_menu_commands(self) -> Optional[List[tuple[str, str]]]:
+        """Return explicit Telegram menu commands from platform config, if set."""
+        raw = self.config.extra.get("menu_commands") if getattr(self.config, "extra", None) else None
+        if raw is None:
+            return None
+        if not isinstance(raw, list):
+            logger.warning("[%s] Ignoring telegram.menu_commands: expected list", self.name)
+            return None
+
+        commands: List[tuple[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                raw_name = item.get("name", "")
+                raw_desc = item.get("description", "")
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                raw_name, raw_desc = item[0], item[1]
+            else:
+                logger.warning("[%s] Ignoring invalid Telegram menu command entry: %r", self.name, item)
+                continue
+
+            name = str(raw_name or "").strip().lstrip("/").lower().replace("-", "_")
+            desc = " ".join(str(raw_desc or "").strip().split())
+            if not re.fullmatch(r"[a-z0-9_]{1,32}", name):
+                logger.warning("[%s] Ignoring invalid Telegram command name: %r", self.name, raw_name)
+                continue
+            if not desc:
+                logger.warning("[%s] Ignoring Telegram command /%s with empty description", self.name, name)
+                continue
+            commands.append((name, desc[:256]))
+
+        return commands
 
     @property
     def message_len_fn(self):
@@ -2225,11 +2288,15 @@ class TelegramAdapter(BasePlatformAdapter):
                     BotCommandScopeAllGroupChats,
                     BotCommandScopeDefault,
                 )
-                from hermes_cli.commands import telegram_menu_commands
                 # Telegram allows up to 100 commands but has an undocumented
                 # payload size limit (~4KB total).  Limit to 30 core commands
                 # to stay well under the threshold while covering all categories.
-                menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
+                menu_commands = self._configured_menu_commands()
+                if menu_commands is None:
+                    from hermes_cli.commands import telegram_menu_commands
+                    menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
+                else:
+                    hidden_count = 0
                 bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
                 # Register for all scopes independently — Telegram picks the
                 # narrowest matching scope per chat type (forum topics fall
@@ -5941,8 +6008,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 if chat_id in self._forum_command_registered:
                     return
                 from telegram import BotCommand, BotCommandScopeChat
-                from hermes_cli.commands import telegram_menu_commands
-                menu_commands, _ = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
+                menu_commands = self._configured_menu_commands()
+                if menu_commands is None:
+                    from hermes_cli.commands import telegram_menu_commands
+                    menu_commands, _ = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
                 bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
                 await self._bot.set_my_commands(bot_commands, scope=BotCommandScopeChat(chat_id=chat_id))
                 self._forum_command_registered.add(chat_id)
@@ -6416,21 +6485,36 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_types = [mime_type]
                 logger.info("[Telegram] Cached user document at %s", cached_path)
 
-                # For text files, inject content into event.text (capped at 100 KB)
-                MAX_TEXT_INJECT_BYTES = 100 * 1024
-                if ext in {".md", ".txt"} and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                # Inject readable document content so restricted Telegram toolsets
+                # can answer from attachments without broad file access.
+                display_name = _safe_document_display_name(original_filename, ext)
+                if ext in _TEXT_DOCUMENT_EXTENSIONS and len(raw_bytes) <= _MAX_TEXT_DOCUMENT_INJECT_BYTES:
                     try:
                         text_content = raw_bytes.decode("utf-8")
-                        display_name = original_filename or f"document{ext}"
-                        display_name = re.sub(r'[^\w.\- ]', '_', display_name)
-                        injection = f"[Content of {display_name}]:\n{text_content}"
-                        if event.text:
-                            event.text = f"{injection}\n\n{event.text}"
-                        else:
-                            event.text = injection
+                        event.text = _prepend_document_content(event.text, display_name, text_content)
                     except UnicodeDecodeError:
                         logger.warning(
                             "[Telegram] Could not decode text file as UTF-8, skipping content injection",
+                            exc_info=True,
+                        )
+                elif ext in _EXTRACTABLE_DOCUMENT_EXTENSIONS:
+                    from tools.read_extract import ExtractionError, extract_document_text, is_extractable_document
+
+                    try:
+                        if is_extractable_document(cached_path):
+                            text_content = extract_document_text(cached_path)
+                            if len(text_content.encode("utf-8")) <= _MAX_TEXT_DOCUMENT_INJECT_BYTES:
+                                event.text = _prepend_document_content(event.text, display_name, text_content)
+                            else:
+                                logger.info(
+                                    "[Telegram] Skipping extracted document injection for %s: extracted text exceeds %d bytes",
+                                    display_name,
+                                    _MAX_TEXT_DOCUMENT_INJECT_BYTES,
+                                )
+                    except ExtractionError:
+                        logger.warning(
+                            "[Telegram] Could not extract document text from %s",
+                            display_name,
                             exc_info=True,
                         )
 

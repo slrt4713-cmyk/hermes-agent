@@ -9,19 +9,24 @@ from __future__ import annotations
 
 import json
 import posixpath
+import re
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 __all__ = ["EXTRACTABLE_EXTENSIONS", "ExtractionError", "extract_document_text", "is_extractable_document"]
 
-EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx"})
+EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx", ".pptx", ".pdf"})
 MAX_XLSX_BYTES = 50 * 1024 * 1024
+MAX_PDF_BYTES = 50 * 1024 * 1024
 _MAX_XLSX_ROWS_PER_SHEET = 5000
 _MAX_XLSX_COLS = 256
 
 _NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _NS_S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
@@ -47,6 +52,10 @@ def extract_document_text(path: str) -> str:
         return _extract_docx(path)
     if ext == ".xlsx":
         return _extract_xlsx(path)
+    if ext == ".pptx":
+        return _extract_pptx(path)
+    if ext == ".pdf":
+        return _extract_pdf(path)
     raise ExtractionError(f"Unsupported document type: {path!r}")
 
 
@@ -161,6 +170,71 @@ def _extract_xlsx(path: str) -> str:
     if not out:
         raise ExtractionError("XLSX has no visible sheets with content")
     return "\n".join(out).rstrip("\n") + "\n"
+
+
+def _slide_sort_key(name: str) -> tuple[int, str]:
+    match = re.search(r"/slide(\d+)\.xml$", name)
+    return (int(match.group(1)) if match else 10**9, name)
+
+
+def _extract_pptx(path: str) -> str:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            slide_names = sorted(
+                (name for name in zf.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", name)),
+                key=_slide_sort_key,
+            )
+            if not slide_names:
+                raise ExtractionError("PPTX contains no slides")
+            a = f"{{{_NS_A}}}"
+            out: list[str] = []
+            for index, name in enumerate(slide_names, start=1):
+                try:
+                    root = ET.fromstring(zf.read(name))
+                except ET.ParseError:
+                    continue
+                texts = [node.text or "" for node in root.iter(f"{a}t")]
+                body = "\n".join(text.strip() for text in texts if text and text.strip())
+                if body:
+                    out.extend((f"# -- Slide {index} --", body, ""))
+    except zipfile.BadZipFile as exc:
+        raise ExtractionError(f"Not a valid PPTX: {exc}") from exc
+    except OSError as exc:
+        raise ExtractionError(str(exc)) from exc
+
+    if not out:
+        raise ExtractionError("PPTX contains no extractable text")
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def _extract_pdf(path: str) -> str:
+    try:
+        size = Path(path).stat().st_size
+    except OSError as exc:
+        raise ExtractionError(str(exc)) from exc
+    if size > MAX_PDF_BYTES:
+        raise ExtractionError(f"PDF is too large to extract safely: {size} bytes")
+
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        raise ExtractionError("pdftotext is not installed")
+    try:
+        proc = subprocess.run(
+            [pdftotext, "-layout", "-enc", "UTF-8", path, "-"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ExtractionError(f"PDF extraction failed: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip()
+        raise ExtractionError(f"pdftotext failed: {detail or proc.returncode}")
+    text = proc.stdout.strip()
+    if not text:
+        raise ExtractionError("PDF contains no extractable text")
+    return text + "\n"
 
 
 def _shared_strings(zf: zipfile.ZipFile, names: set[str]) -> list[str]:

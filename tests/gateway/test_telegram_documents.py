@@ -11,6 +11,7 @@ We mock the telegram module at import time to avoid collection errors.
 import asyncio
 import os
 import sys
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -122,6 +123,51 @@ def _make_video(file_obj=None):
     return video
 
 
+def _make_docx_bytes(text: str) -> bytes:
+    from io import BytesIO
+
+    buf = BytesIO()
+    escaped = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "word/document.xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                f"<w:body><w:p><w:r><w:t>{escaped}</w:t></w:r></w:p></w:body>"
+                "</w:document>"
+            ),
+        )
+    return buf.getvalue()
+
+
+def _make_pptx_bytes(text: str) -> bytes:
+    from io import BytesIO
+
+    buf = BytesIO()
+    escaped = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "ppt/slides/slide1.xml",
+            (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                f"<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{escaped}</a:t></a:r></a:p>"
+                "</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"
+            ),
+        )
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -231,6 +277,61 @@ class TestDocumentDownloadBlock:
         await adapter._handle_media_message(update, MagicMock())
         event = adapter.handle_message.call_args[0][0]
         assert "# Title" in event.text
+
+    @pytest.mark.asyncio
+    async def test_supported_csv_injects_content(self, adapter):
+        content = b"name,value\nalpha,42"
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="data.csv", mime_type="text/csv",
+            file_size=len(content), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert "alpha,42" in event.text
+        assert "[Content of data.csv]" in event.text
+
+    @pytest.mark.asyncio
+    async def test_supported_docx_extracts_content(self, adapter):
+        content = _make_docx_bytes("Quarterly board memo")
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="memo.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            file_size=len(content),
+            file_obj=file_obj,
+        )
+        msg = _make_message(document=doc, caption="Please summarize")
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_types == ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+        assert "[Content of memo.docx]" in event.text
+        assert "Quarterly board memo" in event.text
+        assert "Please summarize" in event.text
+
+    @pytest.mark.asyncio
+    async def test_supported_pptx_extracts_content(self, adapter):
+        content = _make_pptx_bytes("Pipeline update slide")
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="deck.pptx",
+            mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            file_size=len(content),
+            file_obj=file_obj,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_types == ["application/vnd.openxmlformats-officedocument.presentationml.presentation"]
+        assert "[Content of deck.pptx]" in event.text
+        assert "Pipeline update slide" in event.text
 
     @pytest.mark.asyncio
     async def test_caption_preserved_with_injection(self, adapter):
