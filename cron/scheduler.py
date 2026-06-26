@@ -648,6 +648,30 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
+def _looks_like_telegram_private_chat(chat_id: str) -> bool:
+    try:
+        return int(str(chat_id)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _delivery_send_metadata(
+    platform_name: str,
+    chat_id: str,
+    thread_id: Optional[str],
+) -> Optional[dict]:
+    if not thread_id:
+        return None
+
+    metadata = {"thread_id": thread_id}
+    if platform_name.lower() == "telegram" and _looks_like_telegram_private_chat(chat_id):
+        metadata["telegram_dm_topic_reply_fallback"] = True
+        tid = str(thread_id)
+        if tid and tid != "1":
+            metadata["direct_messages_topic_id"] = tid
+    return metadata
+
+
 # Media extension sets — audio routing is centralized in gateway.platforms.base
 # via should_send_media_as_audio() so Telegram-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
@@ -811,7 +835,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         runtime_adapter = (adapters or {}).get(platform)
         delivered = False
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
-            send_metadata = {"thread_id": thread_id} if thread_id else None
+            send_metadata = _delivery_send_metadata(platform_name, chat_id, thread_id)
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()
