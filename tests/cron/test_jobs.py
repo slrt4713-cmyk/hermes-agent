@@ -1129,6 +1129,34 @@ class TestEnabledToolsets:
         assert fetched["enabled_toolsets"] == ["web", "delegation"]
 
 
+class TestMemoryProviderTools:
+    def test_disabled_by_default(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h")
+        assert job["memory_provider_tools"] is False
+
+    def test_explicit_opt_in_is_persisted(self, tmp_cron_dir):
+        job = create_job(
+            prompt="write a weekly plan",
+            schedule="every 1h",
+            memory_provider_tools=True,
+        )
+        assert get_job(job["id"])["memory_provider_tools"] is True
+
+    def test_opt_in_can_be_disabled_via_update(self, tmp_cron_dir):
+        job = create_job(
+            prompt="write a weekly plan",
+            schedule="every 1h",
+            memory_provider_tools=True,
+        )
+        update_job(job["id"], {"memory_provider_tools": False})
+        assert get_job(job["id"])["memory_provider_tools"] is False
+
+    def test_update_rejects_non_boolean_value(self, tmp_cron_dir):
+        job = create_job(prompt="monitor", schedule="every 1h")
+        with pytest.raises(ValueError, match="must be a boolean"):
+            update_job(job["id"], {"memory_provider_tools": "true"})
+
+
 class TestMarkJobRunConcurrency:
     """Regression tests for concurrent parallel job state writes.
 
