@@ -140,6 +140,31 @@ def test_refresh_preserves_memory_provider_and_context_engine_tools(monkeypatch)
     assert added == {"mcp_new_server_tool"}
 
 
+def test_refresh_preserves_explicit_memory_provider_tool_opt_in(monkeypatch):
+    """A cron tools-only provider survives a late MCP snapshot rebuild."""
+    agent = _agent([], enabled=[])
+    agent._memory_provider_tools_enabled = True
+    agent._memory_manager = types.SimpleNamespace(
+        get_all_tool_schemas=lambda: [
+            {"name": "sibyl_remember", "description": "", "parameters": {}}
+        ]
+    )
+
+    import model_tools
+    monkeypatch.setattr(
+        model_tools,
+        "get_tool_definitions",
+        lambda **kw: [_tool("mcp_calendar_list_events")],
+    )
+
+    mcp_tool.refresh_agent_mcp_tools(agent)
+
+    assert agent.valid_tool_names == {
+        "mcp_calendar_list_events",
+        "sibyl_remember",
+    }
+
+
 def test_refresh_respects_context_engine_toolset_gate(monkeypatch):
     """#5544: context-engine tools must NOT be re-injected on a restricted
     toolset. A platform with enabled_toolsets that excludes context_engine

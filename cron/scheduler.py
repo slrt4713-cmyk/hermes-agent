@@ -2494,6 +2494,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
             skip_memory=True,  # Cron system prompts would corrupt user representations
+            memory_provider_tools=job.get("memory_provider_tools") is True,
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,

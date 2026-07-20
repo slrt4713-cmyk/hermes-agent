@@ -276,6 +276,7 @@ def cron_create(args):
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
         script=getattr(args, "script", None),
+        memory_provider_tools=getattr(args, "memory_provider_tools", False),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", False) or None,
     )
@@ -292,6 +293,8 @@ def cron_create(args):
         print(f"  Script: {job_data['script']}")
     if job_data.get("no_agent"):
         print("  Mode: no-agent (script stdout delivered directly)")
+    if job_data.get("memory_provider_tools"):
+        print("  Memory provider tools: enabled")
     if job_data.get("workdir"):
         print(f"  Workdir: {job_data['workdir']}")
     print(f"  Next run: {result['next_run_at']}")
@@ -339,6 +342,7 @@ def cron_edit(args):
         repeat=getattr(args, "repeat", None),
         skills=final_skills,
         script=getattr(args, "script", None),
+        memory_provider_tools=getattr(args, "memory_provider_tools", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", None),
     )
@@ -354,6 +358,10 @@ def cron_edit(args):
         print(f"  Skills: {', '.join(updated['skills'])}")
     else:
         print("  Skills: none")
+    print(
+        "  Memory provider tools: "
+        f"{'enabled' if updated.get('memory_provider_tools') else 'disabled'}"
+    )
     if updated.get("script"):
         print(f"  Script: {updated['script']}")
     if updated.get("no_agent"):
