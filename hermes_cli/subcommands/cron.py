@@ -70,6 +70,14 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         "--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
+    cron_create.add_argument(
+        "--memory-provider-tools",
+        action="store_true",
+        help=(
+            "Expose explicit tools from the active external memory provider. "
+            "Implicit memory prompt injection and turn synchronization stay disabled."
+        ),
+    )
 
     # cron edit
     cron_edit = cron_subparsers.add_parser(
@@ -133,6 +141,22 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument(
         "--workdir",
         help="Absolute path for the job to run from (injects AGENTS.md etc. and sets terminal cwd). Pass empty string to clear.",
+    )
+    memory_provider_tools = cron_edit.add_mutually_exclusive_group()
+    memory_provider_tools.add_argument(
+        "--memory-provider-tools",
+        dest="memory_provider_tools",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Enable explicit external memory-provider tools for this job.",
+    )
+    memory_provider_tools.add_argument(
+        "--no-memory-provider-tools",
+        dest="memory_provider_tools",
+        action="store_const",
+        const=False,
+        help="Disable external memory-provider tools for this job.",
     )
 
     # lifecycle actions

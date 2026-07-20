@@ -320,6 +320,7 @@ print(review)
 | `max_iterations` | `int` | `90` | Max tool-calling iterations per conversation |
 | `skip_context_files` | `bool` | `False` | Skip loading AGENTS.md files |
 | `skip_memory` | `bool` | `False` | Disable persistent memory read/write |
+| `memory_provider_tools` | `bool` | `False` | Expose explicit external memory-provider tools while implicit memory behavior stays disabled |
 | `api_key` | `str` | `None` | API key (falls back to env vars) |
 | `base_url` | `str` | `None` | Custom API endpoint URL |
 | `platform` | `str` | `None` | Platform hint (`"discord"`, `"telegram"`, etc.) |
@@ -331,6 +332,7 @@ print(review)
 :::tip
 - Set **`skip_context_files=True`** if you don't want `AGENTS.md` files from the working directory loaded into the system prompt.
 - Set **`skip_memory=True`** to prevent the agent from reading or writing persistent memory — recommended for stateless API endpoints.
+- Combine **`skip_memory=True`** with **`memory_provider_tools=True`** only when the agent must explicitly call the active provider's tools without automatic prompt injection, prefetch, or turn synchronization.
 - The `platform` parameter (e.g., `"discord"`, `"telegram"`) injects platform-specific formatting hints so the agent adapts its output style.
 :::
 
