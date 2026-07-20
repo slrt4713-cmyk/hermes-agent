@@ -521,6 +521,26 @@ cronjob(action="create", name="weekly-news-summary",
 
 When `enabled_toolsets` is set on a job it wins; otherwise the `hermes tools` cron-platform config wins; otherwise Hermes falls back to the built-in defaults. This matters for cost control: carrying `moa`, `browser`, `delegation` into every tiny "fetch news" job bloats the tool-schema prompt on every LLM call.
 
+### Explicit memory-provider tools
+
+Cron disables memory-provider prompt injection, prefetch, and automatic turn synchronization by default. A job that must deliberately read or write through the active external memory provider can opt into its tools without enabling those implicit behaviors:
+
+```bash
+hermes cron create "0 18 * * 0" "Write the proposed weekly plan" \
+  --memory-provider-tools
+```
+
+The same opt-in is available through the agent tool:
+
+```text
+cronjob(action="create", name="weekly-plan",
+        schedule="0 18 * * 0",
+        memory_provider_tools=true,
+        prompt="Write the proposed weekly plan")
+```
+
+Use `hermes cron edit <job_id> --no-memory-provider-tools` to remove the capability. Existing and newly created jobs remain opted out unless this field is explicitly enabled.
+
 ### Skipping the agent entirely: `wakeAgent`
 
 If your cron job attaches a pre-check script (via `script=`), the script can decide at runtime whether Hermes should even invoke the agent. Emit a final stdout line of the form:
