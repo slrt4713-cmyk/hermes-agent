@@ -19,7 +19,13 @@ class RecordingMemoryProvider:
         self.init_kwargs = dict(kwargs)
 
     def get_tool_schemas(self):
-        return []
+        return [
+            {
+                "name": "recording_remember",
+                "description": "Remember a record",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
 
     def shutdown(self):
         pass
@@ -92,6 +98,67 @@ def test_aiagent_forwards_user_id_alt_to_memory_provider():
     assert provider.init_kwargs["platform"] == "feishu"
     assert "warning_callback" not in provider.init_kwargs
     assert "status_callback" not in provider.init_kwargs
+
+
+def test_skip_memory_keeps_provider_disabled_without_explicit_tool_opt_in():
+    provider = RecordingMemoryProvider()
+    cfg = {"memory": {"provider": "recording"}, "agent": {}}
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("plugins.memory.load_memory_provider", return_value=provider) as load_provider,
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            platform="cron",
+        )
+
+    assert agent._memory_manager is None
+    load_provider.assert_not_called()
+
+
+def test_explicit_provider_tools_initialize_in_tools_only_mode():
+    provider = RecordingMemoryProvider()
+    cfg = {"memory": {"provider": "recording"}, "agent": {}}
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("plugins.memory.load_memory_provider", return_value=provider),
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            memory_provider_tools=True,
+            enabled_toolsets=[],
+            session_id="cron-session",
+            platform="cron",
+        )
+
+    assert agent._memory_manager is not None
+    assert agent._memory_manager._tools_only is True
+    assert provider.init_session_id == "cron-session"
+    assert provider.init_kwargs["platform"] == "cron"
+    assert "recording_remember" in agent.valid_tool_names
+    assert agent._memory_manager.build_system_prompt() == ""
 
 
 class CoreShadowProvider:

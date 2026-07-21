@@ -13,6 +13,7 @@ export interface CronJobFormState {
   no_agent: boolean;
   context_from: string;
   enabled_toolsets: string[];
+  memory_provider_tools: boolean;
   workdir: string;
 }
 
@@ -62,6 +63,7 @@ export function buildCronJobPayload(form: CronJobFormState): CronJobMutation {
     no_agent: Boolean(form.no_agent),
     context_from: contextFrom.length > 0 ? contextFrom : null,
     enabled_toolsets: enabledToolsets.length > 0 ? enabledToolsets : null,
+    memory_provider_tools: Boolean(form.memory_provider_tools),
     workdir: optionalText(form.workdir),
   };
 }
@@ -90,6 +92,7 @@ export function cronJobFormFromJob(job: CronJob): CronJobFormState {
     no_agent: Boolean(job.no_agent),
     context_from: listToText(job.context_from),
     enabled_toolsets: splitCronList(job.enabled_toolsets),
+    memory_provider_tools: Boolean(job.memory_provider_tools),
     workdir: asString(job.workdir),
   };
 }

@@ -319,6 +319,7 @@ def init_agent(
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
+    memory_provider_tools: bool = False,
     session_db=None,
     parent_session_id: str = None,
     iteration_budget: "IterationBudget" = None,
@@ -356,6 +357,9 @@ def init_agent(
         openrouter_min_coding_score (float): Coding-score floor (0.0-1.0) for the
             openrouter/pareto-code router. Only applied when model == "openrouter/pareto-code".
             None or empty = let OpenRouter pick the strongest available coder.
+        memory_provider_tools (bool): Initialize and expose explicit tools from the
+            active external memory provider even when skip_memory=True. Implicit
+            provider context, prefetch, and turn synchronization remain disabled.
         session_id (str): Pre-generated session ID for logging (optional, auto-generated if not provided)
         tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
         clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
@@ -1330,9 +1334,11 @@ def init_agent(
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
+    agent._memory_provider_tools_enabled = bool(memory_provider_tools)
+    raw_mem_config = _agent_cfg.get("memory", {})
+    mem_config = raw_mem_config if isinstance(raw_mem_config, dict) else {}
     if not skip_memory:
         try:
-            mem_config = _agent_cfg.get("memory", {})
             agent._memory_enabled = mem_config.get("memory_enabled", False)
             agent._user_profile_enabled = mem_config.get("user_profile_enabled", False)
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
@@ -1351,14 +1357,16 @@ def init_agent(
     # Memory provider plugin (external — one at a time, alongside built-in)
     # Reads memory.provider from config to select which plugin to activate.
     agent._memory_manager = None
-    if not skip_memory:
+    if not skip_memory or memory_provider_tools:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
 
             if _mem_provider_name and _mem_provider_name.strip():
                 from agent.memory_manager import MemoryManager as _MemoryManager
                 from plugins.memory import load_memory_provider as _load_mem
-                agent._memory_manager = _MemoryManager()
+                agent._memory_manager = _MemoryManager(
+                    tools_only=bool(skip_memory and memory_provider_tools)
+                )
                 _mp = _load_mem(_mem_provider_name)
                 if _mp and _mp.is_available():
                     agent._memory_manager.add_provider(_mp)

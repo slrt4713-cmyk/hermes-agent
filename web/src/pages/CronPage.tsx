@@ -142,6 +142,7 @@ function emptyCronJobForm(): CronJobEditorState {
     no_agent: false,
     context_from: "",
     enabled_toolsets: [],
+    memory_provider_tools: false,
     workdir: "",
     scheduleState: { ...DEFAULT_SCHEDULE_STATE },
   };
@@ -286,6 +287,17 @@ function CronAdvancedFields({
             placeholder="/absolute/project/path"
           />
         </div>
+
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            className="accent-foreground"
+            checked={form.memory_provider_tools}
+            disabled={form.no_agent}
+            onChange={(e) => update("memory_provider_tools", e.target.checked)}
+          />
+          memory_provider_tools: expose explicit external memory tools
+        </label>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div className="grid gap-1">
