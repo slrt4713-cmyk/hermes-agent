@@ -234,6 +234,77 @@ class TestDocumentDownloadBlock:
         assert "# Title" in event.text
 
     @pytest.mark.asyncio
+    async def test_structured_document_injects_extracted_content(self, adapter):
+        content = b"fake-docx"
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="brief.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            file_size=len(content),
+            file_obj=file_obj,
+        )
+        msg = _make_message(document=doc, caption="Summarize this")
+
+        with patch(
+            "tools.read_extract.extract_document_text",
+            return_value="Extracted document body\n",
+        ):
+            await adapter._handle_media_message(_make_update(msg), MagicMock())
+
+        event = adapter.handle_message.call_args[0][0]
+        assert "[Content of brief.docx]" in event.text
+        assert "Extracted document body" in event.text
+        assert event.text.endswith("Summarize this")
+
+    @pytest.mark.asyncio
+    async def test_structured_extraction_failure_keeps_cached_document(self, adapter):
+        from tools.read_extract import ExtractionError
+
+        content = b"fake-pdf"
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="brief.pdf",
+            mime_type="application/pdf",
+            file_size=len(content),
+            file_obj=file_obj,
+        )
+
+        with patch(
+            "tools.read_extract.extract_document_text",
+            side_effect=ExtractionError("not readable"),
+        ):
+            await adapter._handle_media_message(
+                _make_update(_make_message(document=doc)), MagicMock()
+            )
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls and event.media_urls[0].endswith("brief.pdf")
+        assert "[Content of" not in (event.text or "")
+
+    @pytest.mark.asyncio
+    async def test_large_extracted_document_is_not_injected(self, adapter):
+        content = b"fake-pptx"
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="deck.pptx",
+            mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            file_size=len(content),
+            file_obj=file_obj,
+        )
+
+        with patch(
+            "tools.read_extract.extract_document_text",
+            return_value="x" * (101 * 1024),
+        ):
+            await adapter._handle_media_message(
+                _make_update(_make_message(document=doc)), MagicMock()
+            )
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls and event.media_urls[0].endswith("deck.pptx")
+        assert "[Content of" not in (event.text or "")
+
+    @pytest.mark.asyncio
     async def test_caption_preserved_with_injection(self, adapter):
         content = b"file text"
         file_obj = _make_file_obj(content)

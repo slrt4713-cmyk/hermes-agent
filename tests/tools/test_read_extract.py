@@ -11,10 +11,13 @@ Run with:  python -m pytest tests/tools/test_read_extract.py -v
 """
 
 import json
+import io
 import os
+import subprocess
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from tools.read_extract import (
     ExtractionError,
@@ -51,8 +54,38 @@ def _write_xlsx(path, *, workbook, rels, shared, sheets):
             z.writestr(part, xml)
 
 
+def _write_pptx(path, slides, *, order=None):
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        for number, xml in slides.items():
+            z.writestr(f"ppt/slides/slide{number}.xml", xml)
+        if order is not None:
+            slide_ids = "".join(
+                f'<p:sldId id="{256 + index}" r:id="rId{number}"/>'
+                for index, number in enumerate(order)
+            )
+            z.writestr(
+                "ppt/presentation.xml",
+                f'<p:presentation xmlns:p="{_NS_P}" xmlns:r="{_NS_R}">'
+                f"<p:sldIdLst>{slide_ids}</p:sldIdLst></p:presentation>",
+            )
+            relationships = "".join(
+                f'<Relationship Id="rId{number}" Type="{_NS_R}/slide" '
+                f'Target="slides/slide{number}.xml"/>'
+                for number in slides
+            )
+            z.writestr(
+                "ppt/_rels/presentation.xml.rels",
+                f'<Relationships xmlns="{_NS_PKG_REL}">{relationships}</Relationships>',
+            )
+
+
 _NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _NS_S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+_NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +97,11 @@ class TestIsExtractable(unittest.TestCase):
         self.assertTrue(is_extractable_document("a.ipynb"))
         self.assertTrue(is_extractable_document("/x/B.DOCX"))
         self.assertTrue(is_extractable_document("report.xlsx"))
+        self.assertTrue(is_extractable_document("slides.pptx"))
+        self.assertTrue(is_extractable_document("report.pdf"))
 
     def test_unrecognized_extensions(self):
         self.assertFalse(is_extractable_document("a.py"))
-        self.assertFalse(is_extractable_document("a.pdf"))
         self.assertFalse(is_extractable_document("a.txt"))
 
 
@@ -127,6 +161,13 @@ class TestNotebookExtraction(unittest.TestCase):
         with self.assertRaises(ExtractionError):
             extract_document_text(p)
 
+    def test_input_size_limit_is_applied_before_json_parsing(self):
+        p = os.path.join(self.tmp, "large.ipynb")
+        _write_notebook(p, [{"cell_type": "code", "source": "print(1)"}])
+        with patch("tools.read_extract._MAX_DOCUMENT_INPUT_BYTES", 1):
+            with self.assertRaisesRegex(ExtractionError, "too large"):
+                extract_document_text(p)
+
 
 # ---------------------------------------------------------------------------
 # Word documents (.docx) — #10737
@@ -174,6 +215,18 @@ class TestDocxExtraction(unittest.TestCase):
             z.writestr("other.xml", "<x/>")
         with self.assertRaises(ExtractionError):
             extract_document_text(p)
+
+    def test_oversized_document_xml_is_rejected(self):
+        p = os.path.join(self.tmp, "large.docx")
+        _write_docx(p, self._doc("<w:p><w:r><w:t>content</w:t></w:r></w:p>"))
+        with patch("tools.read_extract._MAX_XML_PART_BYTES", 1), patch.object(
+            zipfile.ZipFile,
+            "open",
+            side_effect=AssertionError("oversized member must not be decompressed"),
+        ) as open_member:
+            with self.assertRaisesRegex(ExtractionError, "too large"):
+                extract_document_text(p)
+        open_member.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +289,175 @@ class TestXlsxExtraction(unittest.TestCase):
             fh.write(b"nope")
         with self.assertRaises(ExtractionError):
             extract_document_text(p)
+
+    def test_oversized_worksheet_is_rejected(self):
+        p = os.path.join(self.tmp, "large.xlsx")
+        self._build(p, include_hidden=False)
+        with patch("tools.read_extract._MAX_XML_PART_BYTES", 100):
+            with self.assertRaisesRegex(ExtractionError, "too large"):
+                extract_document_text(p)
+
+    def test_rendered_output_stops_at_text_budget(self):
+        p = os.path.join(self.tmp, "bounded.xlsx")
+        self._build(p, include_hidden=False)
+
+        with patch("tools.read_extract._MAX_EXTRACTED_TEXT_BYTES", 32):
+            text = extract_document_text(p)
+
+        self.assertIn("truncated", text)
+        self.assertLess(len(text.encode("utf-8")), 128)
+
+
+# ---------------------------------------------------------------------------
+# PowerPoint presentations (.pptx)
+# ---------------------------------------------------------------------------
+
+class TestPptxExtraction(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rex_pptx_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _slide(*texts):
+        runs = "".join(f"<a:r><a:t>{text}</a:t></a:r>" for text in texts)
+        return f'<p:sld xmlns:a="{_NS_A}" xmlns:p="urn:p"><p:cSld>{runs}</p:cSld></p:sld>'
+
+    def test_slides_fall_back_to_numeric_order_without_presentation_metadata(self):
+        p = os.path.join(self.tmp, "deck.pptx")
+        _write_pptx(p, {10: self._slide("Tenth"), 2: self._slide("Second")})
+
+        text = extract_document_text(p)
+
+        self.assertLess(text.index("Second"), text.index("Tenth"))
+        self.assertIn("# -- Slide 1 --", text)
+        self.assertIn("# -- Slide 2 --", text)
+
+    def test_presentation_metadata_controls_slide_order(self):
+        p = os.path.join(self.tmp, "reordered.pptx")
+        _write_pptx(
+            p,
+            {2: self._slide("Second file"), 10: self._slide("Tenth file")},
+            order=[10, 2],
+        )
+
+        text = extract_document_text(p)
+
+        self.assertLess(text.index("Tenth file"), text.index("Second file"))
+
+    def test_oversized_slide_is_rejected_before_decompression(self):
+        p = os.path.join(self.tmp, "large.pptx")
+        _write_pptx(p, {1: self._slide("content")})
+
+        with patch("tools.read_extract._MAX_PPTX_SLIDE_BYTES", 1):
+            with self.assertRaisesRegex(ExtractionError, "oversized slide"):
+                extract_document_text(p)
+
+    def test_malformed_presentation_raises(self):
+        p = os.path.join(self.tmp, "bad.pptx")
+        with open(p, "wb") as fh:
+            fh.write(b"not a zip")
+
+        with self.assertRaises(ExtractionError):
+            extract_document_text(p)
+
+
+# ---------------------------------------------------------------------------
+# PDF documents (.pdf)
+# ---------------------------------------------------------------------------
+
+class TestPdfExtraction(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rex_pdf_")
+        self.path = os.path.join(self.tmp, "report.pdf")
+        with open(self.path, "wb") as fh:
+            fh.write(b"%PDF-1.4")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    class _FakeProcess:
+        def __init__(self, output=b"", returncode=0):
+            self.stdout = io.BytesIO(output)
+            self._final_returncode = returncode
+            self.returncode = None
+            self.killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self):
+            if self.returncode is None:
+                self.returncode = self._final_returncode
+            return self.returncode
+
+    def test_pdftotext_output_is_returned(self):
+        process = self._FakeProcess(b"Extracted report")
+
+        with patch("tools.read_extract.shutil.which", return_value="/usr/bin/pdftotext"), patch(
+            "tools.read_extract.subprocess.Popen", return_value=process
+        ) as popen:
+            text = extract_document_text(self.path)
+
+        self.assertEqual(text, "Extracted report\n")
+        self.assertEqual(popen.call_args.args[0][-2], self.path)
+        self.assertEqual(popen.call_args.args[0][-1], "-")
+        self.assertEqual(popen.call_args.kwargs["stdout"], subprocess.PIPE)
+
+    def test_output_is_bounded_while_process_is_running(self):
+        process = self._FakeProcess(b"abcdefgh")
+
+        with patch("tools.read_extract._MAX_EXTRACTED_TEXT_BYTES", 4), patch(
+            "tools.read_extract.shutil.which", return_value="/usr/bin/pdftotext"
+        ), patch("tools.read_extract.subprocess.Popen", return_value=process):
+            text = extract_document_text(self.path)
+
+        self.assertTrue(process.killed)
+        self.assertTrue(text.startswith("abcd"))
+        self.assertIn("truncated", text)
+
+    def test_timeout_is_reported_as_extraction_error(self):
+        process = self._FakeProcess()
+
+        class ImmediateTimer:
+            daemon = False
+
+            def __init__(self, _seconds, callback):
+                self.callback = callback
+
+            def start(self):
+                self.callback()
+
+            def cancel(self):
+                pass
+
+        with patch("tools.read_extract.shutil.which", return_value="/usr/bin/pdftotext"), patch(
+            "tools.read_extract.subprocess.Popen", return_value=process
+        ), patch("tools.read_extract.threading.Timer", ImmediateTimer):
+            with self.assertRaisesRegex(ExtractionError, "timed out"):
+                extract_document_text(self.path)
+
+        self.assertTrue(process.killed)
+
+    def test_nonzero_exit_is_reported(self):
+        process = self._FakeProcess(returncode=2)
+        with patch("tools.read_extract.shutil.which", return_value="/usr/bin/pdftotext"), patch(
+            "tools.read_extract.subprocess.Popen", return_value=process
+        ):
+            with self.assertRaisesRegex(ExtractionError, "exit code 2"):
+                extract_document_text(self.path)
+
+    def test_missing_pdftotext_is_reported(self):
+        with patch("tools.read_extract.shutil.which", return_value=None):
+            with self.assertRaisesRegex(ExtractionError, "not installed"):
+                extract_document_text(self.path)
 
 
 # ---------------------------------------------------------------------------
