@@ -711,7 +711,11 @@ def cmd_mcp_login(args):
 
     # Probe triggers the OAuth flow (browser redirect + callback capture).
     try:
-        tools = _probe_single_server(name, server_config)
+        # OAuth approvals happen outside the server. Honour the configured
+        # timeout so an interactive login is not killed by the 30-second
+        # probe default while the client is approving it in a browser.
+        connect_timeout = float(server_config.get("connect_timeout", 30))
+        tools = _probe_single_server(name, server_config, connect_timeout)
         # A clean probe is NOT proof of authentication. Some MCP servers
         # (notably Google's official Drive server) serve initialize +
         # tools/list WITHOUT auth, so the probe lists tools even when the
