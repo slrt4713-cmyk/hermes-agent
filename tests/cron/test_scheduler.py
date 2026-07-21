@@ -1252,6 +1252,33 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["web", "terminal", "file"]
 
+    def test_run_job_memory_provider_tools_are_opt_in(self, tmp_path):
+        job = {
+            "id": "memory-tools-job",
+            "name": "test",
+            "prompt": "write a weekly plan",
+            "memory_provider_tools": True,
+        }
+        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
+            run_job(job)
+
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["skip_memory"] is True
+        assert kwargs["memory_provider_tools"] is True
+
+    def test_run_job_memory_provider_tools_stay_off_for_legacy_jobs(self, tmp_path):
+        job = {
+            "id": "legacy-job",
+            "name": "test",
+            "prompt": "summarize public data",
+        }
+        with self._run_job_patches(tmp_path) as (_fake_db, mock_agent_cls):
+            run_job(job)
+
+        kwargs = mock_agent_cls.call_args.kwargs
+        assert kwargs["skip_memory"] is True
+        assert kwargs["memory_provider_tools"] is False
+
     def test_run_job_disabled_toolsets_layer_user_config_on_baseline(self, tmp_path):
         """agent.disabled_toolsets must be honoured in cron — issue #25752.
 

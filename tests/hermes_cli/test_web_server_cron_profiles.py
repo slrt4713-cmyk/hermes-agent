@@ -123,6 +123,7 @@ async def test_create_cron_job_normalizes_representative_core_fields(
             name="full-core-mapping",
             base_url="https://example.invalid/v1/",
             script=str(scripts_dir / "collect-status.py"),
+            memory_provider_tools=True,
             no_agent=True,
         ),
         profile="worker_alpha",
@@ -131,6 +132,7 @@ async def test_create_cron_job_normalizes_representative_core_fields(
     assert job["name"] == "full-core-mapping"
     assert job["base_url"] == "https://example.invalid/v1"
     assert job["script"] == "collect-status.py"
+    assert job["memory_provider_tools"] is True
     assert job["no_agent"] is True
 
 

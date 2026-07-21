@@ -61,6 +61,7 @@ class TestCronCommandLifecycle:
                 add_skills=None,
                 remove_skills=None,
                 script=None,
+                memory_provider_tools=True,
                 workdir=None,
                 no_agent=None,
             )
@@ -70,6 +71,7 @@ class TestCronCommandLifecycle:
         assert updated["name"] == "Edited Job"
         assert updated["prompt"] == "Revised prompt"
         assert updated["schedule_display"] == "every 120m"
+        assert updated["memory_provider_tools"] is True
 
         cron_command(
             Namespace(
@@ -86,6 +88,7 @@ class TestCronCommandLifecycle:
                 add_skills=None,
                 remove_skills=None,
                 script=None,
+                memory_provider_tools=None,
                 workdir=None,
                 no_agent=None,
             )
@@ -109,6 +112,7 @@ class TestCronCommandLifecycle:
                 skill=None,
                 skills=["blogwatcher", "maps"],
                 script=None,
+                memory_provider_tools=True,
                 workdir=None,
                 no_agent=False,
             )
@@ -120,6 +124,7 @@ class TestCronCommandLifecycle:
         assert len(jobs) == 1
         assert jobs[0]["skills"] == ["blogwatcher", "maps"]
         assert jobs[0]["name"] == "Skill combo"
+        assert jobs[0]["memory_provider_tools"] is True
 
     def test_list_does_not_crash_when_repeat_is_null(self, tmp_cron_dir, capsys):
         """A one-shot job can be persisted with ``"repeat": null``. `cron

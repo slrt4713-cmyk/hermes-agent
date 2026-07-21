@@ -9749,6 +9749,7 @@ class CronJobCreate(BaseModel):
     script: Optional[str] = None
     context_from: Optional[Any] = None
     enabled_toolsets: Optional[List[str]] = None
+    memory_provider_tools: bool = False
     workdir: Optional[str] = None
     no_agent: bool = False
 
@@ -10063,6 +10064,7 @@ async def create_cron_job(body: CronJobCreate, profile: str = "default"):
             script=script,
             context_from=context_from,
             enabled_toolsets=_cron_string_list(body.enabled_toolsets),
+            memory_provider_tools=body.memory_provider_tools,
             workdir=_cron_optional_text(body.workdir),
             no_agent=no_agent,
         )
