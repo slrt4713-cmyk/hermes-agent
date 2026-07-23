@@ -63,6 +63,7 @@ class TestClarifyPrimitive:
         entry = cm.register("id3", "sk3", "Pick", ["X", "Y"])
         assert entry.awaiting_text is False
         assert cm.get_pending_for_session("sk3") is None
+        assert cm.get_any_pending_for_session("sk3") is entry
 
     def test_other_button_flips_to_text_mode(self):
         """mark_awaiting_text makes get_pending_for_session find the entry."""
@@ -204,6 +205,19 @@ class TestGatewayTextIntercept:
         pending2 = cm.get_pending_for_session("sk")
         assert pending2 is not None
         assert pending2.clarify_id == "first"
+
+    def test_get_any_pending_for_session_returns_oldest_button_prompt(self):
+        """Voice routing sees the oldest prompt even when it expects buttons."""
+        from tools import clarify_gateway as cm
+
+        cm.register("first", "voice-sk", "Q1?", ["A"])
+        cm.register("second", "voice-sk", "Q2?", ["B"])
+
+        pending = cm.get_any_pending_for_session("voice-sk")
+
+        assert pending is not None
+        assert pending.clarify_id == "first"
+
     def test_text_fallback_enables_awaiting_text_for_multi_choice(self):
         """When base send_clarify renders choices as text, mark_awaiting_text
         is called so the gateway text-intercept can capture the reply."""

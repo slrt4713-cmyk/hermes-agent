@@ -300,6 +300,32 @@ async def test_control_and_clarify_messages_bypass_text_debounce():
 
 
 @pytest.mark.asyncio
+async def test_voice_bypasses_active_session_for_button_clarify():
+    adapter = _make_adapter()
+    voice = _make_event("")
+    voice.message_type = MessageType.VOICE
+    voice.media_urls = ["/tmp/clarify-answer.ogg"]
+    voice.media_types = ["audio/ogg"]
+    session_key = build_session_key(voice.source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+    adapter._message_handler = AsyncMock(return_value=None)
+    adapter._busy_session_handler = AsyncMock(return_value=True)
+
+    with (
+        patch("tools.clarify_gateway.get_pending_for_session", return_value=None),
+        patch(
+            "tools.clarify_gateway.get_any_pending_for_session",
+            return_value=object(),
+        ),
+    ):
+        await adapter.handle_message(voice)
+
+    adapter._message_handler.assert_awaited_once_with(voice)
+    adapter._busy_session_handler.assert_not_awaited()
+    assert session_key not in adapter._pending_messages
+
+
+@pytest.mark.asyncio
 async def test_debounce_skipped_when_busy_text_mode_not_queue():
     adapter = _make_adapter()
     adapter._busy_text_mode = ""

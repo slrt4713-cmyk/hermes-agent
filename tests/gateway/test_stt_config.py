@@ -182,3 +182,55 @@ async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
     assert result is not None
     assert "queued voice transcript" in result
     assert "voice message" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_clarify_voice_response_uses_transcript_as_free_form_answer():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    event = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+        ),
+        media_urls=["/tmp/clarify-answer.ogg"],
+        media_types=["audio/ogg"],
+    )
+    runner._enrich_message_with_transcription = AsyncMock(
+        return_value=(
+            '[The user sent a voice message~ Here\'s what they said: "Use this list"]',
+            ["Use this list"],
+        )
+    )
+
+    response, transcripts = await runner._clarify_voice_response_text(event)
+
+    assert response == "Use this list"
+    assert transcripts == ["Use this list"]
+
+
+@pytest.mark.asyncio
+async def test_clarify_voice_failure_unblocks_with_visible_fallback():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    event = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+        ),
+        media_urls=[],
+        media_types=[],
+    )
+
+    response, transcripts = await runner._clarify_voice_response_text(event)
+
+    assert "could not be transcribed" in response
+    assert transcripts == []

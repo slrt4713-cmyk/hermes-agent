@@ -4372,11 +4372,15 @@ class BasePlatformAdapter(ABC):
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
                 return
 
-            # Clarify text-capture bypass: if the agent is blocked on a
-            # clarify_tool call awaiting a free-form text response (open-
-            # ended clarify, or user picked "Other"), the next non-command
-            # message in this session MUST reach the runner so the
+            # Clarify response bypass: if the agent is blocked on a
+            # clarify_tool call awaiting a free-form response, the next
+            # eligible message in this session MUST reach the runner so the
             # clarify-intercept can resolve it and unblock the agent.
+            #
+            # Text is eligible for open-ended clarifies or after the user
+            # picked "Other". Voice is eligible for every pending clarify,
+            # including button prompts, because a voice reply cannot tap a
+            # button and must be transcribed before it can be resolved.
             #
             # Without this bypass: the message gets queued in
             # _pending_messages as a follow-up turn instead of reaching the
@@ -4391,12 +4395,17 @@ class BasePlatformAdapter(ABC):
                     _has_text_clarify = (
                         _clarify_mod.get_pending_for_session(session_key) is not None
                     )
+                    _has_voice_clarify = (
+                        event.message_type == MessageType.VOICE
+                        and _clarify_mod.get_any_pending_for_session(session_key) is not None
+                    )
                 except Exception:
                     _has_text_clarify = False
+                    _has_voice_clarify = False
 
-                if _has_text_clarify:
+                if _has_text_clarify or _has_voice_clarify:
                     logger.debug(
-                        "[%s] Routing message to clarify text-intercept for %s",
+                        "[%s] Routing message to clarify response intercept for %s",
                         self.name, session_key,
                     )
                     try:

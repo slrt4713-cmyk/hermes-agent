@@ -7890,18 +7890,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 _update_prompts.pop(_quick_key, None)
 
-        # Intercept messages that are responses to a pending clarify
-        # request that is awaiting free-form text (either an open-ended
-        # clarify with no choices, or one where the user picked the
-        # "Other" button).  The first non-empty user message in the
-        # session resolves the clarify and unblocks the agent thread —
-        # we do NOT route it to the agent as a new turn.
+        # Intercept messages that are responses to a pending clarify.
+        # Plain text is accepted only when the clarify is awaiting free-form
+        # input. Voice is accepted for every pending clarify, including rich
+        # button prompts, because it cannot express a button tap. Transcribe
+        # it here and resolve the blocked agent thread instead of sending it
+        # through the active-session interrupt queue.
         try:
             from tools import clarify_gateway as _clarify_mod
             _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            _pending_voice_clarify = (
+                _clarify_mod.get_any_pending_for_session(_quick_key)
+                if event.message_type == MessageType.VOICE
+                else None
+            )
         except Exception:
             _pending_clarify = None
-        if _pending_clarify is not None:
+            _pending_voice_clarify = None
+        if _pending_voice_clarify is not None:
+            _voice_reply, _voice_transcripts = await self._clarify_voice_response_text(event)
+            _resolved = _clarify_mod.resolve_gateway_clarify(
+                _pending_voice_clarify.clarify_id,
+                _voice_reply,
+            )
+            if _resolved:
+                logger.info(
+                    "Gateway intercepted clarify voice response "
+                    "(session=%s, id=%s, transcripts=%d)",
+                    _quick_key,
+                    _pending_voice_clarify.clarify_id,
+                    len(_voice_transcripts),
+                )
+                if _voice_transcripts:
+                    _echo_adapter = self.adapters.get(source.platform)
+                    _echo_meta = self._thread_metadata_for_source(
+                        source,
+                        self._reply_anchor_for_event(event),
+                    )
+                    if _echo_adapter:
+                        for _transcript in _voice_transcripts:
+                            try:
+                                await _echo_adapter.send(
+                                    source.chat_id,
+                                    f'🎙️ "{_transcript}"',
+                                    metadata=_echo_meta,
+                                )
+                            except Exception as _echo_exc:
+                                logger.debug(
+                                    "Clarify transcript echo failed (non-fatal): %s",
+                                    _echo_exc,
+                                )
+                return ""
+        elif _pending_clarify is not None:
             _raw_clarify_reply = (event.text or "").strip()
             # Skip slash commands — the user clearly wanted to issue a
             # command, not answer the clarify.  Leave the clarify pending
@@ -13538,6 +13578,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return f"{prefix}\n\n{user_text}", successful_transcripts
             return prefix, successful_transcripts
         return user_text, successful_transcripts
+
+    async def _clarify_voice_response_text(
+        self,
+        event: MessageEvent,
+    ) -> tuple[str, List[str]]:
+        """Build a free-form clarify answer from an inbound voice event.
+
+        A transcription failure must still unblock the pending clarify. The
+        returned fallback tells the agent to ask for a typed or button answer
+        instead of leaving the turn silent until the clarify timeout.
+        """
+        audio_paths: List[str] = []
+        media_urls = getattr(event, "media_urls", None) or []
+        media_types = getattr(event, "media_types", None) or []
+        for i, path in enumerate(media_urls):
+            mtype = media_types[i] if i < len(media_types) else ""
+            if mtype.startswith("audio/") or event.message_type == MessageType.VOICE:
+                audio_paths.append(path)
+
+        caption = (event.text or "").strip()
+        if caption == "(The user sent a message with no text content)":
+            caption = ""
+
+        enriched_text = ""
+        transcripts: List[str] = []
+        if audio_paths:
+            enriched_text, transcripts = await self._enrich_message_with_transcription(
+                caption,
+                audio_paths,
+            )
+
+        response_parts = [part for part in [caption, *transcripts] if part]
+        if response_parts:
+            return "\n\n".join(response_parts), transcripts
+        if enriched_text:
+            return enriched_text, transcripts
+        return (
+            "[The user replied with a voice message, but it could not be "
+            "transcribed. Ask them to tap a choice or type their answer.]",
+            [],
+        )
 
     async def _dequeue_pending_with_transcription(
         self,
