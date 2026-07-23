@@ -1,0 +1,62 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: fireflies
+description: Read Fireflies.ai meeting transcripts, summaries, and recording links.
+source: https://docs.fireflies.ai/getting-started/mcp-configuration
+
+# Fireflies.ai ships an OFFICIAL remote MCP server at https://api.fireflies.ai/mcp.
+# It supports native MCP OAuth (browser sign-in with Google/Microsoft), but Hermes
+# runs headless in a container where an interactive OAuth handshake is awkward. So we
+# reach the SAME official endpoint through the `mcp-remote` stdio bridge and
+# authenticate with a static personal API key sent as an Authorization header.
+#
+# Why this works with the catalog installer: the installer prompts for
+# FIREFLIES_API_KEY and writes it to ~/.hermes/.env. At config-load time Hermes
+# interpolates ${FIREFLIES_API_KEY} inside `args` from .env, so the real token is
+# baked into the header the bridge sends. This sidesteps the fact that Hermes does
+# NOT pass arbitrary .env vars into stdio subprocess environments — the credential
+# travels via the interpolated arg, not the subprocess env.
+transport:
+  type: stdio
+  command: npx
+  args:
+    - "-y"
+    - "mcp-remote"
+    - "https://api.fireflies.ai/mcp"
+    - "--header"
+    - "Authorization:Bearer ${FIREFLIES_API_KEY}"
+
+auth:
+  type: api_key
+  env:
+    - name: FIREFLIES_API_KEY
+      prompt: "Fireflies API key (Fireflies dashboard > Settings > Developer Settings, Personal tab)"
+      required: true
+      secret: true
+
+# Tool selection at install time:
+# The official server's exact tool-name strings are not published on a reachable
+# docs page yet (docs.fireflies.ai/getting-started/mcp-tools 404s at time of
+# writing), so we leave `default_enabled` unset. The install-time probe lists
+# whatever the live server exposes and pre-checks all of it. Prune any non-read
+# ("generate summary" style, which is a compute action) tools at the checklist to
+# keep the surface strictly read-only. Re-run any time with:
+#   hermes mcp configure fireflies
+
+post_install: |
+  Get the API key: log into fireflies.ai > Settings > Developer Settings (Personal
+  tab) and copy the key. API access is available on all Fireflies plan tiers. The
+  key is a personal token — it only sees that account's own meetings.
+
+  Notes for the headless container:
+    - The container needs outbound network egress the first time (npx downloads
+      `mcp-remote`) and a writable HOME (mcp-remote caches session state under
+      ~/.mcp-auth).
+    - The API key is interpolated into the process arguments, so it is visible in
+      the container's process list. This is acceptable inside an isolated
+      single-tenant container; do not use this pattern on a shared host.
+    - Keep the agent to the get/search/transcript tools for a read-only surface.
+
+  Start a new Hermes session after install so the Fireflies tools are loaded.

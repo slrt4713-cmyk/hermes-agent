@@ -1,0 +1,102 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: zoom
+description: Read Zoom past meetings, cloud recordings, and recording transcripts.
+source: https://github.com/bcharleson/zoom-agent-cli
+
+# zoom-agent-cli exposes a stdio MCP server (`... mcp`) over the Zoom REST API. It
+# authenticates with Server-to-Server (S2S) OAuth: it mints its own access token
+# from three account-level credentials, so there is no browser/redirect — a good
+# fit for a headless container. Version is pinned; the catalog never floats HEAD.
+transport:
+  type: stdio
+  command: npx
+  args:
+    - "-y"
+    - "zoom-agent-cli@0.1.2"
+    - "mcp"
+
+# The server reads its three credentials from its PROCESS ENVIRONMENT. Hermes does
+# NOT forward arbitrary .env vars into stdio subprocesses (see _build_safe_env in
+# tools/mcp_tool.py), and the catalog installer does not yet write an `env:` block
+# for stdio servers. So after install you MUST add an env block to the generated
+# server entry — see post_install. (Hermes interpolates ${...} from ~/.hermes/.env
+# at load time once the block is present.)
+auth:
+  type: api_key
+  env:
+    - name: ZOOM_ACCOUNT_ID
+      prompt: "Zoom Account ID (Server-to-Server OAuth app > App Credentials tab)"
+      required: true
+      secret: false
+    - name: ZOOM_CLIENT_ID
+      prompt: "Zoom Client ID (Server-to-Server OAuth app > App Credentials tab)"
+      required: true
+      secret: false
+    - name: ZOOM_CLIENT_SECRET
+      prompt: "Zoom Client Secret (Server-to-Server OAuth app > App Credentials tab)"
+      required: true
+      secret: true
+
+# Tool selection at install time:
+# zoom-agent-cli's read surface is small. `meetings_summary` is intentionally left
+# OUT of the default: Zoom's AI-summary scopes are General-app-only and are rejected
+# on a Server-to-Server app, so that tool would fail. The remaining tools are pure
+# reads. If the probe fails at install (the env block below is not wired yet), the
+# installer applies this default list directly.
+tools:
+  default_enabled:
+    - meetings_list
+    - meetings_get
+    - recordings_list
+    - recordings_get
+    - recordings_transcript
+
+post_install: |
+  REQUIRED after install — wire the credentials into the server's environment.
+  Edit ~/.hermes/config.yaml so the zoom entry carries an `env:` block:
+
+      mcp_servers:
+        zoom:
+          command: npx
+          args: ["-y", "zoom-agent-cli@0.1.2", "mcp"]
+          env:
+            ZOOM_ACCOUNT_ID: "${ZOOM_ACCOUNT_ID}"
+            ZOOM_CLIENT_ID: "${ZOOM_CLIENT_ID}"
+            ZOOM_CLIENT_SECRET: "${ZOOM_CLIENT_SECRET}"
+          enabled: true
+          tools:
+            include: [meetings_list, meetings_get, recordings_list, recordings_get, recordings_transcript]
+
+  Hermes interpolates ${...} from ~/.hermes/.env at load time. Then run
+  `hermes mcp test zoom` to confirm the connection, and start a new session.
+
+  Create the credentials (needs a Zoom admin / a role allowed to create S2S apps):
+    1. marketplace.zoom.us > Develop > Build App > Server-to-Server OAuth.
+    2. App Credentials tab: copy Account ID, Client ID, Client Secret.
+    3. Scopes tab — add ONLY these read scopes:
+         user:read:user:admin
+         user:read:list_users:admin
+         meeting:read:list_meetings:admin
+         meeting:read:meeting:admin
+         cloud_recording:read:list_user_recordings:admin
+         cloud_recording:read:recording:admin
+         cloud_recording:read:meeting_transcript:admin
+    4. Activation tab: Activate the app.
+    5. Zoom Admin > Role Management: give the app-owner role the "Recording view"
+       permission. Zoom enforces role permissions IN ADDITION to OAuth scopes — a
+       common cause of empty recording results.
+
+  Caveats:
+    - S2S `:admin` scopes read the WHOLE Zoom account, not one user. Only use this
+      when the operator is trusted with account-wide read.
+    - Cloud recordings + transcripts require a paid plan with Cloud Recording and
+      "Audio transcript" enabled. Transcripts are generated asynchronously, so a
+      recent meeting may not have one yet.
+    - `npx -y` fetches from npm at container start; pin/vendor the package in the
+      image for a hardened deploy.
+
+  Re-run the tool checklist any time with:
+    hermes mcp configure zoom
