@@ -180,6 +180,25 @@ def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
         return None
 
 
+def get_any_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
+    """Return the oldest pending clarify entry, regardless of input mode.
+
+    Rich platform prompts normally wait for a button tap, so
+    ``get_pending_for_session`` intentionally hides them from the plain-text
+    intercept until the user chooses "Other". Voice replies are different:
+    they carry a complete free-form answer but cannot tap a button. Gateway
+    adapters use this lookup to route voice media through STT and resolve the
+    pending clarify instead of queueing or interrupting it.
+    """
+    with _lock:
+        ids = _session_index.get(session_key) or []
+        for cid in ids:
+            entry = _entries.get(cid)
+            if entry is not None:
+                return entry
+        return None
+
+
 def mark_awaiting_text(clarify_id: str) -> bool:
     """Flip an entry into text-capture mode (user picked the 'Other' button).
 
