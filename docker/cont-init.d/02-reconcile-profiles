@@ -22,8 +22,8 @@ set -e
 
 profile_scandir=/run/hermes-profile-services
 mkdir -p "$profile_scandir"
-chown hermes:hermes "$profile_scandir"
 chmod 0700 "$profile_scandir"
+chown hermes:hermes "$profile_scandir"
 
 # Skip the drop when already non-root.
 [ "$(id -u)" = 0 ] || exec /opt/hermes/.venv/bin/python -m hermes_cli.container_boot

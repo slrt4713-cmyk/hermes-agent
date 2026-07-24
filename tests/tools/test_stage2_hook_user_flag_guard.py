@@ -94,11 +94,17 @@ def test_arbitrary_user_uid_is_rejected() -> None:
 
 
 def test_root_start_passes() -> None:
-    """Root start (uid 0) is never blocked."""
-    for text in (_read(STAGE2_HOOK), _read(MAIN_WRAPPER)):
-        proc = _run_guard(text, cur_uid=0, hermes_uid=10000)
-        assert proc.returncode == 0, proc.stderr
-        assert "GUARD_PASSED" in proc.stdout
+    """Root passes the guard so bootstrap can finish before privilege drop."""
+    proc = _run_guard(_read(STAGE2_HOOK), cur_uid=0, hermes_uid=10000)
+    assert proc.returncode == 0, proc.stderr
+    assert "GUARD_PASSED" in proc.stdout
+
+
+def test_main_wrapper_drops_root_before_accessing_runtime_data() -> None:
+    text = _read(MAIN_WRAPPER)
+    drop = 'if [ "$cur_uid" = 0 ]; then\n    exec s6-setuidgid hermes "$0" "$@"\nfi'
+    assert drop in text
+    assert text.index(drop) < text.index("cd /opt/data")
 
 
 def test_user_pinned_to_hermes_uid_passes() -> None:
