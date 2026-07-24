@@ -170,7 +170,13 @@ class TestHandleFunctionCall:
         manager = type(
             "Manager",
             (),
-            {"_middleware": {"tool_request": [fake_invoke_middleware], "tool_execution": [execution_middleware]}},
+            {
+                "_middleware": {
+                    "tool_request": [fake_invoke_middleware],
+                    "tool_execution": [execution_middleware],
+                },
+                "required_bundled_plugin_error": lambda self: None,
+            },
         )()
         monkeypatch.setattr("hermes_cli.plugins.invoke_middleware", fake_invoke_middleware)
         monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)

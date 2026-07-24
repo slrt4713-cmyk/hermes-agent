@@ -1,7 +1,8 @@
 #!/command/with-contenv sh
 # shellcheck shell=sh
-# Make supervise/ trees for ALL declared s6 services queryable and
-# controllable by the unprivileged hermes user (UID 10000).
+# Make selected static application supervise trees queryable and
+# controllable by the unprivileged hermes user (UID 10000). The root
+# profile-gateway-supervisor control tree remains root-only.
 #
 # Background (PR #30136 review item I4): the entire s6 lifecycle
 # (s6-svc, s6-svstat, s6-svwait) is dispatched as the hermes user
@@ -12,17 +13,15 @@
 # is spawned by s6-svscan running as PID 1. So unprivileged clients
 # get EACCES on every probe / control call against the slot.
 #
-# Two fixes, one in each registration path:
+# Two ownership models are used:
 #
 # 1. For RUNTIME-registered profile gateways (created via the s6
-#    runtime register hooks in profiles.py): the Python helper
-#    ``_seed_supervise_skeleton`` pre-creates supervise/ + event/ +
-#    supervise/control owned by hermes BEFORE s6-svscanctl -a fires.
-#    s6-supervise's mkdir/mkfifo are EEXIST-safe, so it inherits our
-#    ownership and never tries to chown back to root.
+#    runtime register hooks in profiles.py): a nested s6-svscan
+#    process runs as hermes, so its entire supervise tree is created
+#    with the correct unprivileged ownership.
 #
 # 2. For STATIC s6-rc services (dashboard, main-hermes) declared at
-#    image-build time under /etc/s6-overlay/s6-rc.d/*: these are
+#    image-build time under /etc/s6-overlay/s6-rc.d/*): these are
 #    compiled by s6-rc at boot, and s6-supervise spawns BEFORE
 #    cont-init.d gets to run — so by the time we're here, the
 #    supervise/ tree is already there as root:root 0700. We chown
@@ -56,7 +55,7 @@ for svc in "$SVC_ROOT"/*; do
     # Skip s6-overlay-internal services (they need to stay root-only;
     # the s6rc-* helpers manage the supervision tree itself).
     case "$name" in
-        s6rc-*|s6-linux-*)
+        profile-gateway-supervisor|s6rc-*|s6-linux-*)
             continue
             ;;
     esac

@@ -86,6 +86,67 @@ def test_null_bytes_in_user_env_are_stripped(tmp_path, monkeypatch):
     assert os.getenv("OPENAI_API_KEY") == "sk-123"
 
 
+def test_dotenv_cannot_override_process_plugin_policy(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    env_file = home / ".env"
+    env_file.write_text(
+        "HERMES_REQUIRED_BUNDLED_PLUGINS=attacker-plugin\n"
+        "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT=/tmp/attacker-root\n"
+        "HERMES_BUNDLED_PLUGINS=/tmp/attacker-plugins\n"
+        "HERMES_AUDIT_KEY_FILE=/tmp/attacker.key\n"
+        "HERMES_AUDIT_SOCKET=/tmp/attacker.sock\n"
+        "HERMES_HOSTED_IMMUTABLE_RUNTIME=0\n"
+        "HTTPS_PROXY=http://attacker.invalid:8080\n",
+        encoding="utf-8",
+    )
+    expected = {
+        "HERMES_REQUIRED_BUNDLED_PLUGINS": "hermes-audit",
+        "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT": "/opt/hermes/plugins",
+        "HERMES_BUNDLED_PLUGINS": "/opt/hermes/plugins",
+        "HERMES_AUDIT_KEY_FILE": "/opt/hermes-example/audit.key",
+        "HERMES_AUDIT_SOCKET": "/run/hermes-agent-audit/events.sock",
+        "HERMES_HOSTED_IMMUTABLE_RUNTIME": "1",
+        "HTTPS_PROXY": "http://host.docker.internal:8888",
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert {name: os.environ.get(name) for name in expected} == expected
+
+
+def test_dotenv_cannot_define_process_plugin_policy(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text(
+        "HERMES_REQUIRED_BUNDLED_PLUGINS=attacker-plugin\n"
+        "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT=/tmp/attacker-root\n"
+        "HERMES_BUNDLED_PLUGINS=/tmp/attacker-plugins\n"
+        "HERMES_AUDIT_KEY_FILE=/tmp/attacker.key\n"
+        "HERMES_AUDIT_SOCKET=/tmp/attacker.sock\n"
+        "HERMES_HOSTED_IMMUTABLE_RUNTIME=0\n"
+        "HTTPS_PROXY=http://attacker.invalid:8080\n",
+        encoding="utf-8",
+    )
+    policy_names = (
+        "HERMES_REQUIRED_BUNDLED_PLUGINS",
+        "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+        "HERMES_BUNDLED_PLUGINS",
+        "HERMES_AUDIT_KEY_FILE",
+        "HERMES_AUDIT_SOCKET",
+        "HERMES_HOSTED_IMMUTABLE_RUNTIME",
+        "HTTPS_PROXY",
+    )
+    for name in policy_names:
+        monkeypatch.delenv(name, raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert all(name not in os.environ for name in policy_names)
+
+
 def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     home.mkdir()

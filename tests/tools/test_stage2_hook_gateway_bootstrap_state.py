@@ -46,8 +46,8 @@ def _seed_block(text: str) -> str:
     """Extract the ``if [ ! -f "$HERMES_HOME/gateway_state.json" ] && … fi``
     block that seeds the gateway state file from the bootstrap env var."""
     m = re.search(
-        r'(if \[ ! -f "\$HERMES_HOME/gateway_state\.json" \] && \\\n'
-        r"(?:.*\n)*?fi)",
+        r'(    if \[ ! -f "\$HERMES_HOME/gateway_state\.json" \] && \\\n'
+        r"(?: {8,}.*\n)*?    fi)",
         text,
     )
     assert m, (

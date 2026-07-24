@@ -38,6 +38,41 @@ _SECRET_SOURCES: dict[str, str] = {}
 # config re-parse, and the ASCII sanitization sweep still ran every time.
 _APPLIED_HOMES: set[str] = set()
 
+# These values define the process security boundary. They may be injected by
+# the container runtime or a package wrapper, but never by a mutable .env file.
+_PROCESS_POLICY_ENV_VARS = (
+    "HERMES_AUDIT_KEY_FILE",
+    "HERMES_AUDIT_SOCKET",
+    "HERMES_HOSTED_IMMUTABLE_RUNTIME",
+    "HERMES_REQUIRED_BUNDLED_PLUGINS",
+    "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+    "HERMES_BUNDLED_PLUGINS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "NODE_USE_ENV_PROXY",
+    "S6_READ_ONLY_ROOT",
+)
+_MISSING_ENV_VALUE = object()
+
+
+def _capture_process_policy_env() -> dict[str, str | object]:
+    return {
+        name: os.environ.get(name, _MISSING_ENV_VALUE)
+        for name in _PROCESS_POLICY_ENV_VARS
+    }
+
+
+def _restore_process_policy_env(snapshot: dict[str, str | object]) -> None:
+    for name, value in snapshot.items():
+        if value is _MISSING_ENV_VALUE:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = str(value)
+
 
 def get_secret_source(env_var: str) -> str | None:
     """Return the label of the secret source that supplied ``env_var``, if any.
@@ -223,6 +258,7 @@ def load_hermes_dotenv(
     - if no user env exists, the project `.env` also overrides stale shell vars.
     """
     loaded: list[Path] = []
+    process_policy_env = _capture_process_policy_env()
 
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
     user_env = home_path / ".env"
@@ -234,16 +270,21 @@ def load_hermes_dotenv(
     if project_env_path and project_env_path.exists():
         _sanitize_env_file_if_needed(project_env_path)
 
-    if user_env.exists():
-        _load_dotenv_with_fallback(user_env, override=True)
-        loaded.append(user_env)
+    try:
+        if user_env.exists():
+            _load_dotenv_with_fallback(user_env, override=True)
+            loaded.append(user_env)
 
-    if project_env_path and project_env_path.exists():
-        _load_dotenv_with_fallback(project_env_path, override=not loaded)
-        loaded.append(project_env_path)
+        if project_env_path and project_env_path.exists():
+            _load_dotenv_with_fallback(project_env_path, override=not loaded)
+            loaded.append(project_env_path)
 
-    _apply_external_secret_sources(home_path)
-    _apply_managed_env()
+        _restore_process_policy_env(process_policy_env)
+        _apply_external_secret_sources(home_path)
+        _restore_process_policy_env(process_policy_env)
+        _apply_managed_env()
+    finally:
+        _restore_process_policy_env(process_policy_env)
 
     return loaded
 

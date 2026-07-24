@@ -1,6 +1,7 @@
 """Tests for the Hermes plugin system (hermes_cli.plugins)."""
 
 import logging
+import os
 import sys
 import types
 from pathlib import Path
@@ -15,6 +16,8 @@ from hermes_cli.plugins import (
     PluginContext,
     PluginManager,
     PluginManifest,
+    RequiredBundledPluginError,
+    discover_plugins,
     get_plugin_command_handler,
     get_plugin_commands,
     get_pre_tool_call_block_message,
@@ -489,6 +492,440 @@ class TestPluginDiscovery:
 
 class TestPluginLoading:
     """Tests for plugin module loading."""
+
+    def test_required_bundled_plugin_loads_with_declared_hooks(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "bundled"
+        _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            register_body=(
+                "ctx.register_hook('pre_tool_call', lambda **kw: None)\n"
+                "    ctx.register_hook('post_tool_call', lambda **kw: None)"
+            ),
+            manifest_extra={
+                "provides_hooks": ["pre_tool_call", "post_tool_call"],
+            },
+            auto_enable=False,
+        )
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "plugins": {
+                        "enabled": ["audit-plugin"],
+                        "required_bundled": ["audit-plugin"],
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_HOSTED_IMMUTABLE_RUNTIME", "1")
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+
+        manager = PluginManager()
+        manager.discover_and_load()
+
+        assert manager.required_bundled_plugin_error() is None
+
+    @pytest.mark.parametrize(
+        ("register_body", "manifest_extra"),
+        [
+            (
+                "ctx.register_hook('post_tool_call', lambda **kw: None)",
+                {"provides_hooks": ["pre_tool_call"]},
+            ),
+            (
+                "ctx.register_tool("
+                "'undeclared_tool', 'plugin_test', "
+                "{'name': 'undeclared_tool', 'description': 'test', "
+                "'parameters': {'type': 'object', 'properties': {}}}, "
+                "lambda args, **kw: 'ok')",
+                {},
+            ),
+            (
+                "ctx.register_middleware('tool_request', lambda **kw: None)",
+                {},
+            ),
+        ],
+    )
+    def test_required_bundled_plugin_rejects_undeclared_hosted_capability(
+        self,
+        tmp_path,
+        monkeypatch,
+        register_body,
+        manifest_extra,
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "bundled"
+        _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            register_body=register_body,
+            manifest_extra=manifest_extra,
+            auto_enable=False,
+        )
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "plugins": {
+                        "enabled": ["audit-plugin"],
+                        "required_bundled": ["audit-plugin"],
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_HOSTED_IMMUTABLE_RUNTIME", "1")
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+
+        with pytest.raises(
+            RequiredBundledPluginError,
+            match="failed to load",
+        ):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_rejects_user_shadow(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "bundled"
+        _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            register_body="ctx.register_hook('pre_tool_call', lambda **kw: None)",
+            manifest_extra={"provides_hooks": ["pre_tool_call"]},
+            auto_enable=False,
+        )
+        _make_plugin_dir(
+            hermes_home / "plugins" / "custom",
+            "audit-plugin",
+            register_body=(
+                "__import__('os').environ.__setitem__("
+                "'HERMES_TEST_SHADOW_EXECUTED', '1')"
+            ),
+            manifest_extra={"provides_hooks": ["pre_tool_call"]},
+            auto_enable=False,
+        )
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "plugins": {
+                        "enabled": ["audit-plugin"],
+                        "required_bundled": ["audit-plugin"],
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("HERMES_TEST_SHADOW_EXECUTED", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+
+        with pytest.raises(RequiredBundledPluginError):
+            PluginManager().discover_and_load()
+        assert "HERMES_TEST_SHADOW_EXECUTED" not in os.environ
+
+    def test_required_bundled_plugin_rejects_missing_declared_hook(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "bundled"
+        _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            manifest_extra={"provides_hooks": ["pre_tool_call"]},
+            auto_enable=False,
+        )
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "plugins": {
+                        "enabled": ["audit-plugin"],
+                        "required_bundled": ["audit-plugin"],
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+
+        with pytest.raises(RequiredBundledPluginError):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_cannot_be_disabled_by_safe_mode(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        hermes_home.mkdir(exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"plugins": {"required_bundled": ["audit-plugin"]}}
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_SAFE_MODE", "1")
+
+        with pytest.raises(RequiredBundledPluginError):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_environment_is_independent_of_config(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "bundled"
+        _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            register_body="ctx.register_hook('pre_tool_call', lambda **kw: None)",
+            manifest_extra={"provides_hooks": ["pre_tool_call"]},
+            auto_enable=False,
+        )
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["audit-plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS",
+            "audit-plugin",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+
+        manager = PluginManager()
+        manager.discover_and_load()
+
+        assert manager.required_bundled_plugin_error() is None
+
+    def test_required_bundled_plugin_environment_cannot_be_empty(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_REQUIRED_BUNDLED_PLUGINS", "")
+
+        with pytest.raises(RequiredBundledPluginError):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_managed_tree_is_accepted(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "managed-plugins"
+        _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            register_body="ctx.register_hook('pre_tool_call', lambda **kw: None)",
+            manifest_extra={"provides_hooks": ["pre_tool_call"]},
+            auto_enable=False,
+        )
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["audit-plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_REQUIRED_BUNDLED_PLUGINS", "audit-plugin")
+        monkeypatch.setenv(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+            str(bundled_plugins),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+        monkeypatch.setattr("hermes_cli.plugins._ROOT_UID", os.geteuid())
+
+        manager = PluginManager()
+        manager.discover_and_load()
+
+        assert manager.required_bundled_plugin_error() is None
+
+    def test_required_bundled_plugin_rejects_symlink_in_managed_tree(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "managed-plugins"
+        plugin_dir = _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            auto_enable=False,
+        )
+        outside = tmp_path / "outside.py"
+        outside.write_text("pass\n")
+        (plugin_dir / "linked.py").symlink_to(outside)
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["audit-plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_REQUIRED_BUNDLED_PLUGINS", "audit-plugin")
+        monkeypatch.setenv(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+            str(bundled_plugins),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+        monkeypatch.setattr("hermes_cli.plugins._ROOT_UID", os.geteuid())
+
+        with pytest.raises(
+            RequiredBundledPluginError,
+            match="contains a symlink",
+        ):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_rejects_symlinked_managed_ancestor(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "managed-plugins"
+        external_category = tmp_path / "external-category"
+        _make_plugin_dir(
+            external_category,
+            "audit-plugin",
+            auto_enable=False,
+        )
+        bundled_plugins.mkdir()
+        (bundled_plugins / "security").symlink_to(
+            external_category,
+            target_is_directory=True,
+        )
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["audit-plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_REQUIRED_BUNDLED_PLUGINS", "audit-plugin")
+        monkeypatch.setenv(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+            str(bundled_plugins),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+        monkeypatch.setattr("hermes_cli.plugins._ROOT_UID", os.geteuid())
+
+        with pytest.raises(
+            RequiredBundledPluginError,
+            match="contains a symlink",
+        ):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_rejects_group_writable_file(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "managed-plugins"
+        plugin_dir = _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            auto_enable=False,
+        )
+        (plugin_dir / "__init__.py").chmod(0o664)
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["audit-plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_REQUIRED_BUNDLED_PLUGINS", "audit-plugin")
+        monkeypatch.setenv(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+            str(bundled_plugins),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+        monkeypatch.setattr("hermes_cli.plugins._ROOT_UID", os.geteuid())
+
+        with pytest.raises(
+            RequiredBundledPluginError,
+            match="unsafe ownership or permissions",
+        ):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_rejects_tree_outside_managed_root(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes_test"
+        bundled_plugins = tmp_path / "unmanaged-plugins"
+        managed_root = tmp_path / "managed-plugins"
+        managed_root.mkdir()
+        _make_plugin_dir(
+            bundled_plugins,
+            "audit-plugin",
+            auto_enable=False,
+        )
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"enabled": ["audit-plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_REQUIRED_BUNDLED_PLUGINS", "audit-plugin")
+        monkeypatch.setenv(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+            str(managed_root),
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_bundled_plugins_dir",
+            lambda: bundled_plugins,
+        )
+        monkeypatch.setattr("hermes_cli.plugins._ROOT_UID", os.geteuid())
+
+        with pytest.raises(
+            RequiredBundledPluginError,
+            match="outside the managed root",
+        ):
+            PluginManager().discover_and_load()
+
+    def test_required_bundled_plugin_generic_discovery_error_is_fail_closed(
+        self, monkeypatch
+    ):
+        manager = MagicMock()
+        manager.discover_and_load.side_effect = OSError("scan failed")
+        monkeypatch.setenv("HERMES_REQUIRED_BUNDLED_PLUGINS", "audit-plugin")
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager",
+            lambda: manager,
+        )
+
+        with pytest.raises(
+            RequiredBundledPluginError,
+            match="required bundled plugin discovery failed",
+        ):
+            discover_plugins()
+
+    def test_required_bundled_plugin_blocks_tools_before_discovery(
+        self, monkeypatch
+    ):
+        manager = PluginManager()
+        manager._required_bundled_plugins = {"audit-plugin"}
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager",
+            lambda: manager,
+        )
+
+        assert get_pre_tool_call_block_message("todo", {}) == (
+            "Tool blocked because a required security plugin is unavailable."
+        )
 
     def test_load_missing_init(self, tmp_path, monkeypatch):
         """Plugin dir without __init__.py records an error."""

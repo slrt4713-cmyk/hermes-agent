@@ -13,9 +13,9 @@ hooks land.
 
 Every ``docker exec`` here runs as the unprivileged ``hermes`` user
 (via :func:`docker_exec` in conftest); see the conftest module
-docstring. ``/run/service`` is chowned hermes-writable by the
-``02-reconcile-profiles`` cont-init.d script, so register/unregister
-operations work correctly under UID 10000.
+docstring. ``/run/hermes-profile-services`` is owned by hermes and watched
+by a nested s6-svscan process that also runs as hermes. The root
+``/run/service`` tree stays inaccessible to the runtime user.
 """
 from __future__ import annotations
 
@@ -44,22 +44,108 @@ S6ServiceManager().unregister_profile_gateway("phase3test")
 print("UNREGISTERED")
 """
 
+_NESTED_SUPERVISOR_PROBE = r"""
+import pathlib
+import subprocess
+import time
+
+scandir = pathlib.Path("/run/hermes-profile-services")
+slot = scandir / "security-probe"
+slot.mkdir()
+run = slot / "run"
+run.write_text(
+    "#!/bin/sh\n"
+    "id -u > /opt/data/s6-security-probe.uid\n"
+    "exec sleep 120\n"
+)
+run.chmod(0o755)
+subprocess.run(
+    ["/command/s6-svscanctl", "-a", str(scandir)],
+    check=True,
+    timeout=5,
+)
+uid_file = pathlib.Path("/opt/data/s6-security-probe.uid")
+observed_uid = ""
+for _ in range(50):
+    try:
+        observed_uid = uid_file.read_text().strip()
+    except FileNotFoundError:
+        observed_uid = ""
+    if observed_uid:
+        break
+    time.sleep(0.1)
+print(observed_uid)
+"""
+
 
 def _exec(container: str, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
     return docker_exec(container, *args, timeout=timeout)
+
+
+def _start_hardened_container(built_image: str, container_name: str) -> None:
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container_name,
+            "--read-only",
+            "--tmpfs",
+            "/run:rw,nosuid,nodev,exec,size=64m,mode=0755",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777",
+            "-e",
+            "S6_READ_ONLY_ROOT=1",
+            built_image,
+            "sleep",
+            "120",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
+def test_runtime_cannot_register_a_root_s6_service(
+    built_image: str, container_name: str,
+) -> None:
+    _start_hardened_container(built_image, container_name)
+    time.sleep(3)
+
+    root_slot = _exec(
+        container_name,
+        "mkdir",
+        "/run/service/hermes-security-probe",
+    )
+    assert root_slot.returncode != 0, "runtime user can write the root s6 scandir"
+
+    root_rescan = _exec(
+        container_name,
+        "/command/s6-svscanctl",
+        "-a",
+        "/run/service",
+    )
+    assert root_rescan.returncode != 0, "runtime user can control root s6-svscan"
+
+    expected_uid = _exec(container_name, "id", "-u")
+    probe = _exec(
+        container_name,
+        "python3",
+        "-c",
+        _NESTED_SUPERVISOR_PROBE,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == expected_uid.stdout.strip()
 
 
 def test_s6_register_creates_service_dir_in_live_container(
     built_image: str, container_name: str,
 ) -> None:
     """S6ServiceManager.register_profile_gateway must create
-    ``/run/service/gateway-<profile>/`` and trigger s6-svscan rescan
+    ``/run/hermes-profile-services/gateway-<profile>/`` and trigger s6-svscan rescan
     against the real s6 supervision tree."""
-    subprocess.run(
-        ["docker", "run", "-d", "--name", container_name, built_image,
-         "sleep", "120"],
-        check=True, capture_output=True, timeout=30,
-    )
+    _start_hardened_container(built_image, container_name)
     # Give the supervision tree a moment to come up.
     time.sleep(3)
 
@@ -69,21 +155,31 @@ def test_s6_register_creates_service_dir_in_live_container(
     )
 
     # Service directory exists with the expected structure.
-    r = _exec(container_name, "test", "-d", "/run/service/gateway-phase3test")
+    r = _exec(
+        container_name,
+        "test",
+        "-d",
+        "/run/hermes-profile-services/gateway-phase3test",
+    )
     assert r.returncode == 0, "service directory not created"
 
-    r = _exec(container_name, "test", "-f", "/run/service/gateway-phase3test/run")
+    r = _exec(
+        container_name,
+        "test",
+        "-f",
+        "/run/hermes-profile-services/gateway-phase3test/run",
+    )
     assert r.returncode == 0, "run script not created"
 
     r = _exec(container_name, "test", "-f",
-              "/run/service/gateway-phase3test/log/run")
+              "/run/hermes-profile-services/gateway-phase3test/log/run")
     assert r.returncode == 0, "log/run script not created"
 
     # s6-svscan picked it up — s6-svstat works against the dir.
     # `docker exec` doesn't put /command/ on PATH (only the supervision
     # tree does), so call s6-svstat by absolute path.
     r = _exec(container_name, "/command/s6-svstat",
-              "/run/service/gateway-phase3test")
+              "/run/hermes-profile-services/gateway-phase3test")
     assert r.returncode == 0, f"s6-svstat failed: {r.stderr or r.stdout}"
 
     # list_profile_gateways picks it up.
@@ -100,11 +196,7 @@ def test_s6_unregister_removes_service_dir_in_live_container(
     """unregister_profile_gateway must stop the service, remove the
     directory, and trigger s6-svscan rescan so the supervise process
     is dropped."""
-    subprocess.run(
-        ["docker", "run", "-d", "--name", container_name, built_image,
-         "sleep", "120"],
-        check=True, capture_output=True, timeout=30,
-    )
+    _start_hardened_container(built_image, container_name)
     time.sleep(3)
 
     # First register so we have something to unregister.
@@ -118,7 +210,12 @@ def test_s6_unregister_removes_service_dir_in_live_container(
     )
 
     # Directory is gone.
-    r = _exec(container_name, "test", "-d", "/run/service/gateway-phase3test")
+    r = _exec(
+        container_name,
+        "test",
+        "-d",
+        "/run/hermes-profile-services/gateway-phase3test",
+    )
     assert r.returncode != 0, "service directory still exists after unregister"
 
     # list_profile_gateways no longer includes it.

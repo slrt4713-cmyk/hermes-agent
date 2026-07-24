@@ -19,6 +19,14 @@ set -eu
 
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
+HERMES_HOSTED_IMMUTABLE_RUNTIME="${HERMES_HOSTED_IMMUTABLE_RUNTIME:-0}"
+case "$HERMES_HOSTED_IMMUTABLE_RUNTIME" in
+    0 | 1) ;;
+    *)
+        echo "[stage2] ERROR: HERMES_HOSTED_IMMUTABLE_RUNTIME must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
 
 # Drop to hermes via s6-setuidgid, but skip it when already non-root.
 as_hermes() { [ "$(id -u)" = 0 ] || { "$@"; return; }; s6-setuidgid hermes "$@"; }
@@ -83,7 +91,18 @@ fi
 # fail on first boot with `mkdir: cannot create directory '/...': Permission
 # denied` and the cont-init hook exits non-zero. Idempotent — `mkdir -p`
 # is a no-op if the dir already exists. (#18482, salvages #18488)
-mkdir -p "$HERMES_HOME"
+if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" = 1 ]; then
+    [ "$HERMES_HOME" = /opt/data ] || {
+        echo "[stage2] ERROR: hosted immutable runtime requires HERMES_HOME=/opt/data" >&2
+        exit 1
+    }
+    [ -d "$HERMES_HOME" ] || {
+        echo "[stage2] ERROR: hosted immutable runtime data directory is missing" >&2
+        exit 1
+    }
+else
+    mkdir -p "$HERMES_HOME"
+fi
 
 # Numeric UID/GID validation: must be digits only, non-root, 1-65534.
 # NAS hosts such as Unraid commonly use low non-root IDs (99:100).
@@ -103,6 +122,14 @@ validate_uid_gid() {
 # HERMES_GID still win when both are set.  See #15290, salvages #25872.
 HERMES_UID="${HERMES_UID:-${PUID:-}}"
 HERMES_GID="${HERMES_GID:-${PGID:-}}"
+
+if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" = 1 ]; then
+    if [ "$HERMES_UID" != 10000 ] || [ "$HERMES_GID" != 10000 ] || \
+            [ "$(id -u hermes)" != 10000 ] || [ "$(id -g hermes)" != 10000 ]; then
+        echo "[stage2] ERROR: hosted immutable runtime requires UID:GID 10000:10000" >&2
+        exit 1
+    fi
+fi
 
 if [ -n "${HERMES_UID:-}" ] && validate_uid_gid "$HERMES_UID" && [ "$HERMES_UID" != "$(id -u hermes)" ]; then
     echo "[stage2] Changing hermes UID to $HERMES_UID"
@@ -180,6 +207,7 @@ done
 #
 # The canonical list of hermes-owned subdirs is the same one the s6-setuidgid
 # mkdir -p block below seeds. Keep them in sync if the seed list changes.
+if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ]; then
 actual_hermes_uid=$(id -u hermes)
 needs_chown=false
 if [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_hermes_uid" ]; then
@@ -268,6 +296,16 @@ if [ -f "$HERMES_HOME/config.yaml" ]; then
     chown hermes:hermes "$HERMES_HOME/config.yaml" 2>/dev/null || true
     chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
 fi
+else
+    as_hermes test -r "$HERMES_HOME/.env" || {
+        echo "[stage2] ERROR: hosted runtime secrets are not readable by hermes" >&2
+        exit 1
+    }
+    as_hermes test -r "$HERMES_HOME/config.yaml" || {
+        echo "[stage2] ERROR: hosted runtime configuration is not readable by hermes" >&2
+        exit 1
+    }
+fi
 
 # --- Seed directory structure as hermes user ---
 # Run as hermes via s6-setuidgid so dirs end up owned correctly (matters
@@ -304,6 +342,7 @@ as_hermes mkdir -p \
 # stale 'docker' stamp from $HERMES_HOME if one is present (the host install's
 # own installer re-creates its code-scoped stamp; a genuine container relies on
 # the baked /opt/hermes stamp, so deleting the data-dir copy is safe).
+if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ]; then
 if [ -f "$HERMES_HOME/.install_method" ]; then
     stamped="$(tr -d '[:space:]' < "$HERMES_HOME/.install_method" 2>/dev/null || true)"
     if [ "$stamped" = "docker" ]; then
@@ -330,6 +369,7 @@ if [ -f "$HERMES_HOME/.env" ]; then
     chown hermes:hermes "$HERMES_HOME/.env" 2>/dev/null || true
     chmod 600 "$HERMES_HOME/.env" 2>/dev/null || true
 fi
+fi
 
 # --- Migrate persisted config schema ---
 # Docker image upgrades replace the code under $INSTALL_DIR but preserve
@@ -337,7 +377,7 @@ fi
 # config-schema migrations that `hermes update` runs for non-Docker installs,
 # after first-boot seeding and before supervised gateway services start.
 # Set HERMES_SKIP_CONFIG_MIGRATION=1 for controlled/manual migrations.
-if [ -f "$HERMES_HOME/config.yaml" ]; then
+if as_hermes test -f "$HERMES_HOME/config.yaml"; then
     s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py" \
         || echo "[stage2] Warning: docker_config_migrate.py failed; continuing"
 fi
@@ -345,7 +385,9 @@ fi
 # auth.json: bootstrap from env on first boot only. Same semantics as the
 # pre-s6 entrypoint — the [ ! -f ] guard is critical to avoid clobbering
 # rotated refresh tokens on container restart.
-if [ ! -f "$HERMES_HOME/auth.json" ] && [ -n "${HERMES_AUTH_JSON_BOOTSTRAP:-}" ]; then
+if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ] && \
+        [ ! -f "$HERMES_HOME/auth.json" ] && \
+        [ -n "${HERMES_AUTH_JSON_BOOTSTRAP:-}" ]; then
     printf '%s' "$HERMES_AUTH_JSON_BOOTSTRAP" > "$HERMES_HOME/auth.json"
     chown hermes:hermes "$HERMES_HOME/auth.json" 2>/dev/null || true
     chmod 600 "$HERMES_HOME/auth.json"
@@ -376,11 +418,13 @@ fi
 # Only a literal "running" is honoured (the sole value in the reconciler's
 # _AUTOSTART_STATES); any other value is ignored so a typo can't write a
 # bogus state the reconciler would treat as "no prior state" anyway.
-if [ ! -f "$HERMES_HOME/gateway_state.json" ] && \
-        [ "${HERMES_GATEWAY_BOOTSTRAP_STATE:-}" = "running" ]; then
-    printf '{"gateway_state":"running"}\n' > "$HERMES_HOME/gateway_state.json"
-    chown hermes:hermes "$HERMES_HOME/gateway_state.json" 2>/dev/null || true
-    chmod 644 "$HERMES_HOME/gateway_state.json"
+if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ]; then
+    if [ ! -f "$HERMES_HOME/gateway_state.json" ] && \
+            [ "${HERMES_GATEWAY_BOOTSTRAP_STATE:-}" = "running" ]; then
+        printf '{"gateway_state":"running"}\n' > "$HERMES_HOME/gateway_state.json"
+        chown hermes:hermes "$HERMES_HOME/gateway_state.json" 2>/dev/null || true
+        chmod 644 "$HERMES_HOME/gateway_state.json"
+    fi
 fi
 
 # --- Sync bundled skills ---
