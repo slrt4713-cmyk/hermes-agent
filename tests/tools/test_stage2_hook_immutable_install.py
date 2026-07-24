@@ -46,3 +46,11 @@ def test_stage2_documents_immutable_install_contract(stage2_text: str) -> None:
     assert "PYTHONDONTWRITEBYTECODE" in stage2_text
     assert "HERMES_DISABLE_LAZY_INSTALLS=1" in stage2_text
     assert "/opt/hermes" in stage2_text
+
+
+def test_hosted_runtime_disables_root_data_mutations(stage2_text: str) -> None:
+    assert 'HERMES_HOSTED_IMMUTABLE_RUNTIME="${HERMES_HOSTED_IMMUTABLE_RUNTIME:-0}"' in stage2_text
+    assert 'if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ]; then' in stage2_text
+    assert "hosted immutable runtime requires UID:GID 10000:10000" in stage2_text
+    assert 'as_hermes test -r "$HERMES_HOME/.env"' in stage2_text
+    assert 'as_hermes test -r "$HERMES_HOME/config.yaml"' in stage2_text

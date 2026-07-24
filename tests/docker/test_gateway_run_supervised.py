@@ -31,7 +31,15 @@ def _sh(container: str, command: str, timeout: int = 30):
 
 
 def _svstat(container: str, slot: str = "gateway-default") -> str:
-    r = _sh(container, f"/command/s6-svstat /run/service/{slot}")
+    service_root = (
+        "/run/service"
+        if slot == "dashboard"
+        else "/run/hermes-profile-services"
+    )
+    r = _sh(
+        container,
+        f"/command/s6-svstat {service_root}/{slot}",
+    )
     return r.stdout if r.returncode == 0 else ""
 
 
@@ -392,4 +400,3 @@ def test_supervised_gateway_stdout_reaches_docker_logs(
         "destination may have been dropped by the new s6-log script. "
         f"File contents:\n{file_contents}"
     )
-

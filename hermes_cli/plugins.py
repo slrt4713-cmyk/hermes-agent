@@ -39,6 +39,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import stat
 import sys
 import threading
 import types
@@ -70,6 +71,111 @@ except ImportError:  # pragma: no cover – yaml is optional at import time
     yaml = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+class RequiredBundledPluginError(RuntimeError):
+    """Raised when an explicitly required bundled plugin is unavailable."""
+
+
+_ROOT_UID = 0
+
+
+def _required_bundled_plugins_root() -> Optional[Path]:
+    """Return the absolute managed plugin root, when policy configures one."""
+    raw_root = os.environ.get("HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT")
+    if raw_root is None:
+        return None
+    if not raw_root or raw_root.strip() != raw_root:
+        raise RequiredBundledPluginError(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT is invalid"
+        )
+    root = Path(os.path.normpath(raw_root))
+    if not root.is_absolute():
+        raise RequiredBundledPluginError(
+            "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT must be absolute"
+        )
+    return root
+
+
+def _validate_required_tree_entry(
+    path: Path,
+    *,
+    expected_directory: Optional[bool] = None,
+) -> bool:
+    """Validate ownership and mode for one managed plugin tree entry."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RequiredBundledPluginError(
+            "a required bundled plugin path is unavailable"
+        ) from exc
+
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RequiredBundledPluginError(
+            "a required bundled plugin path contains a symlink"
+        )
+    is_directory = stat.S_ISDIR(metadata.st_mode)
+    if expected_directory is True and not is_directory:
+        raise RequiredBundledPluginError(
+            "a required bundled plugin directory is invalid"
+        )
+    if expected_directory is False and not stat.S_ISREG(metadata.st_mode):
+        raise RequiredBundledPluginError(
+            "a required bundled plugin file is invalid"
+        )
+    if expected_directory is None and not (
+        is_directory or stat.S_ISREG(metadata.st_mode)
+    ):
+        raise RequiredBundledPluginError(
+            "a required bundled plugin tree entry is invalid"
+        )
+    if metadata.st_uid != _ROOT_UID or metadata.st_mode & 0o022:
+        raise RequiredBundledPluginError(
+            "a required bundled plugin tree has unsafe ownership or permissions"
+        )
+    return is_directory
+
+
+def _validate_required_bundled_plugin_tree(
+    managed_root: Path,
+    plugin_path: Path,
+) -> None:
+    """Validate a required plugin from its managed root through its full tree."""
+    normalized_plugin = Path(os.path.normpath(str(plugin_path)))
+    if not normalized_plugin.is_absolute():
+        raise RequiredBundledPluginError(
+            "a required bundled plugin path is not absolute"
+        )
+    try:
+        relative_plugin = normalized_plugin.relative_to(managed_root)
+    except ValueError as exc:
+        raise RequiredBundledPluginError(
+            "a required bundled plugin is outside the managed root"
+        ) from exc
+    if not relative_plugin.parts:
+        raise RequiredBundledPluginError(
+            "the managed plugin root cannot itself be a plugin"
+        )
+
+    _validate_required_tree_entry(managed_root, expected_directory=True)
+    current = managed_root
+    for component in relative_plugin.parts:
+        current = current / component
+        _validate_required_tree_entry(current, expected_directory=True)
+
+    pending = [normalized_plugin]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = list(directory.iterdir())
+        except OSError as exc:
+            raise RequiredBundledPluginError(
+                "a required bundled plugin tree cannot be inspected"
+            ) from exc
+        for entry in entries:
+            is_directory = _validate_required_tree_entry(entry)
+            if is_directory:
+                pending.append(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +356,64 @@ def _get_enabled_plugins() -> Optional[set]:
         return None
 
 
+def _get_required_bundled_plugins() -> Set[str]:
+    """Read required bundled plugins from config and immutable runtime policy."""
+    environment_value = os.environ.get("HERMES_REQUIRED_BUNDLED_PLUGINS")
+    environment_required: list[str] = []
+    if environment_value is not None:
+        if not environment_value:
+            raise RequiredBundledPluginError(
+                "HERMES_REQUIRED_BUNDLED_PLUGINS cannot be empty"
+            )
+        environment_required = environment_value.split(",")
+
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        config = {}
+
+    plugins_cfg = config.get("plugins")
+    if plugins_cfg is None:
+        config_required: list[Any] = []
+    elif not isinstance(plugins_cfg, dict):
+        raise RequiredBundledPluginError(
+            "plugins configuration is invalid"
+        )
+    else:
+        config_required = plugins_cfg.get("required_bundled", [])
+        if not isinstance(config_required, list):
+            raise RequiredBundledPluginError(
+                "plugins.required_bundled must be a list"
+            )
+
+    normalized: Set[str] = set()
+    for source, values in (
+        ("plugins.required_bundled", config_required),
+        ("HERMES_REQUIRED_BUNDLED_PLUGINS", environment_required),
+    ):
+        seen: Set[str] = set()
+        for value in values:
+            if (
+                not isinstance(value, str)
+                or not value
+                or value.strip() != value
+                or "/" in value
+                or "," in value
+            ):
+                raise RequiredBundledPluginError(
+                    f"{source} contains an invalid plugin name"
+                )
+            if value in seen:
+                raise RequiredBundledPluginError(
+                    f"{source} contains a duplicate plugin name"
+                )
+            seen.add(value)
+            normalized.add(value)
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -321,6 +485,21 @@ class PluginContext:
         # Lazy-built host-owned LLM facade — see ctx.llm property below.
         self._llm: Any = None
 
+    def _require_hosted_declaration(
+        self,
+        capability_kind: str,
+        capability_name: str,
+        declared: List[str],
+    ) -> None:
+        if (
+            _env_enabled("HERMES_HOSTED_IMMUTABLE_RUNTIME")
+            and capability_name not in declared
+        ):
+            raise RuntimeError(
+                f"Plugin '{self.manifest.name}' tried to register undeclared "
+                f"{capability_kind} '{capability_name}' in the hosted runtime."
+            )
+
     # -- host-owned LLM access ----------------------------------------------
 
     @property
@@ -384,6 +563,11 @@ class PluginContext:
         CDP-backed implementation). Without it, attempting to register a name
         already claimed by a different toolset is rejected.
         """
+        self._require_hosted_declaration(
+            "tool",
+            name,
+            self.manifest.provides_tools,
+        )
         from tools.registry import registry
 
         registry.register(
@@ -1047,6 +1231,11 @@ class PluginContext:
         Unknown hook names produce a warning but are still stored so
         forward-compatible plugins don't break.
         """
+        self._require_hosted_declaration(
+            "hook",
+            hook_name,
+            self.manifest.provides_hooks,
+        )
         if hook_name not in VALID_HOOKS:
             logger.warning(
                 "Plugin '%s' registered unknown hook '%s' "
@@ -1068,6 +1257,7 @@ class PluginContext:
         real callback. Unknown kinds are stored for forward compatibility but
         warned so plugin authors can catch typos.
         """
+        self._require_hosted_declaration("middleware", kind, [])
         if kind not in VALID_MIDDLEWARE:
             logger.warning(
                 "Plugin '%s' registered unknown middleware '%s' "
@@ -1157,6 +1347,7 @@ class PluginManager:
         # ``re.Pattern``, or a constraint dict); ``callback`` is an async
         # function with the slack_bolt signature ``(ack, body, action)``.
         self._slack_action_handlers: List[tuple] = []
+        self._required_bundled_plugins: Set[str] = set()
 
     # -----------------------------------------------------------------------
     # Public
@@ -1171,11 +1362,16 @@ class PluginManager:
         """
         if self._discovered and not force:
             return
+        self._required_bundled_plugins = _get_required_bundled_plugins()
         # Safe mode (--safe-mode / HERMES_SAFE_MODE=1): troubleshooting run
         # with all customizations disabled. Skip plugin discovery entirely so
         # no third-party code (hooks, tools, platforms) loads. Mark as
         # discovered so callers see a clean empty registry, not a retry loop.
         if env_var_enabled("HERMES_SAFE_MODE"):
+            if self._required_bundled_plugins:
+                raise RequiredBundledPluginError(
+                    "safe mode cannot disable required bundled plugins"
+                )
             logger.info("HERMES_SAFE_MODE=1 — plugin discovery skipped")
             self._discovered = True
             return
@@ -1272,6 +1468,7 @@ class PluginManager:
         winners: Dict[str, PluginManifest] = {}
         for manifest in manifests:
             winners[manifest.key or manifest.name] = manifest
+        self._validate_required_bundled_manifests(manifests, winners)
         for manifest in winners.values():
             lookup_key = manifest.key or manifest.name
 
@@ -1353,6 +1550,91 @@ class PluginManager:
                 len(self._plugins),
                 sum(1 for p in self._plugins.values() if p.enabled),
             )
+        requirement_error = self.required_bundled_plugin_error()
+        if requirement_error is not None:
+            raise RequiredBundledPluginError(requirement_error)
+
+    def _validate_required_bundled_manifests(
+        self,
+        manifests: List[PluginManifest],
+        winners: Dict[str, PluginManifest],
+    ) -> None:
+        """Validate required bundled sources before any plugin code executes."""
+        if not self._required_bundled_plugins:
+            return
+
+        managed_root = _required_bundled_plugins_root()
+        for required_name in sorted(self._required_bundled_plugins):
+            name_matches = [
+                manifest
+                for manifest in manifests
+                if manifest.name == required_name
+            ]
+            if len(name_matches) != 1:
+                raise RequiredBundledPluginError(
+                    "a required bundled plugin is missing or ambiguous"
+                )
+            bundled_manifest = name_matches[0]
+            if bundled_manifest.source != "bundled":
+                raise RequiredBundledPluginError(
+                    "a required bundled plugin was shadowed"
+                )
+            lookup_key = bundled_manifest.key or bundled_manifest.name
+            if winners.get(lookup_key) is not bundled_manifest:
+                raise RequiredBundledPluginError(
+                    "a required bundled plugin was shadowed"
+                )
+            if managed_root is not None:
+                if not bundled_manifest.path:
+                    raise RequiredBundledPluginError(
+                        "a required bundled plugin path is unavailable"
+                    )
+                _validate_required_bundled_plugin_tree(
+                    managed_root,
+                    Path(bundled_manifest.path),
+                )
+
+    def required_bundled_plugin_error(self) -> Optional[str]:
+        """Return a generic requirement failure without leaking plugin errors."""
+        required = self._required_bundled_plugins
+        if not required and not self._discovered:
+            try:
+                required = _get_required_bundled_plugins()
+            except RequiredBundledPluginError:
+                return "required bundled plugin configuration is invalid"
+        if not required:
+            return None
+        if not self._discovered:
+            return "required bundled plugins have not been discovered"
+
+        for required_name in sorted(required):
+            matches = [
+                loaded
+                for loaded in self._plugins.values()
+                if loaded.manifest.name == required_name
+            ]
+            if len(matches) != 1:
+                return "a required bundled plugin is missing or ambiguous"
+            loaded = matches[0]
+            if (
+                loaded.manifest.source != "bundled"
+                or not loaded.enabled
+                or loaded.error is not None
+            ):
+                return "a required bundled plugin failed to load"
+            declared_hooks = set(loaded.manifest.provides_hooks)
+            if (
+                set(loaded.hooks_registered) != declared_hooks
+                or any(not self._hooks.get(name) for name in declared_hooks)
+            ):
+                return "a required bundled plugin did not register its hooks"
+            if set(loaded.tools_registered) != set(
+                loaded.manifest.provides_tools
+            ):
+                return "a required bundled plugin did not register its tools"
+            if loaded.middleware_registered:
+                return "a required bundled plugin registered forbidden middleware"
+        return None
 
     # -----------------------------------------------------------------------
     # Directory scanning
@@ -1856,7 +2138,16 @@ def discover_plugins(force: bool = False) -> None:
     Default behavior is idempotent. Pass ``force=True`` to rescan plugin
     manifests and reload state in the current process.
     """
-    get_plugin_manager().discover_and_load(force=force)
+    try:
+        get_plugin_manager().discover_and_load(force=force)
+    except RequiredBundledPluginError:
+        raise
+    except Exception as exc:
+        if "HERMES_REQUIRED_BUNDLED_PLUGINS" in os.environ:
+            raise RequiredBundledPluginError(
+                "required bundled plugin discovery failed"
+            ) from exc
+        raise
 
 
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
@@ -1925,33 +2216,47 @@ def get_pre_tool_call_block_message(
     directive wins.  Invalid or irrelevant hook return values are
     silently ignored so existing observer-only hooks are unaffected.
     """
-    allowed = getattr(_thread_tool_whitelist, "allowed", None)
-    if allowed is not None and tool_name not in allowed:
-        fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
-        return fmt.format(tool_name=tool_name)
+    try:
+        requirement_error = get_plugin_manager().required_bundled_plugin_error()
+        if requirement_error is not None:
+            return "Tool blocked because a required security plugin is unavailable."
 
-    hook_results = invoke_hook(
-        "pre_tool_call",
-        tool_name=tool_name,
-        args=args if isinstance(args, dict) else {},
-        task_id=task_id,
-        session_id=session_id,
-        tool_call_id=tool_call_id,
-        turn_id=turn_id,
-        api_request_id=api_request_id,
-        middleware_trace=list(middleware_trace or []),
-    )
+        allowed = getattr(_thread_tool_whitelist, "allowed", None)
+        if allowed is not None and tool_name not in allowed:
+            fmt = getattr(_thread_tool_whitelist, "fmt", "Tool '{tool_name}' denied")
+            return fmt.format(tool_name=tool_name)
 
-    for result in hook_results:
-        if not isinstance(result, dict):
-            continue
-        if result.get("action") != "block":
-            continue
-        message = result.get("message")
-        if isinstance(message, str) and message:
-            return message
+        hook_results = invoke_hook(
+            "pre_tool_call",
+            tool_name=tool_name,
+            args=args if isinstance(args, dict) else {},
+            task_id=task_id,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            turn_id=turn_id,
+            api_request_id=api_request_id,
+            middleware_trace=list(middleware_trace or []),
+        )
 
-    return None
+        for result in hook_results:
+            if not isinstance(result, dict):
+                continue
+            if result.get("action") != "block":
+                continue
+            message = result.get("message")
+            if isinstance(message, str) and message:
+                return message
+
+        return None
+    except Exception:
+        # Fail closed in the confined hosted runtime: if the pre-tool-call
+        # policy evaluation itself errors, block the tool rather than let it
+        # run unchecked. Normal (non-hosted) deployments keep the lenient
+        # observer-only behaviour by re-raising to the caller, which treats a
+        # raised error as "no block".
+        if _env_enabled("HERMES_HOSTED_IMMUTABLE_RUNTIME"):
+            return "Tool blocked because the security pre-check could not be evaluated."
+        raise
 
 
 def _ensure_plugins_discovered(force: bool = False) -> PluginManager:

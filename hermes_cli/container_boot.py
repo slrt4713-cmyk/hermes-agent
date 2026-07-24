@@ -1,6 +1,6 @@
 """Container-boot reconciliation of per-profile gateway s6 services.
 
-Service directories under /run/service/ live on **tmpfs** and are wiped
+Service directories under /run/hermes-profile-services/ live on **tmpfs** and are wiped
 on every container restart. Profile directories under
 ``$HERMES_HOME/profiles/<name>/`` live on the persistent VOLUME, and
 each one records its gateway's last state in ``gateway_state.json``.
@@ -70,7 +70,7 @@ def reconcile_profile_gateways(
     maps an empty profile suffix to ``gateway-default``, so this slot
     is what ``hermes gateway start`` (no ``-p``) targets. Without it,
     bare ``hermes gateway start`` inside the container would land on
-    ``s6-svc -u /run/service/gateway-default`` → uncaught
+    ``s6-svc -u /run/hermes-profile-services/gateway-default`` → uncaught
     ``CalledProcessError`` → traceback to the user (PR #30136 review).
 
     The default slot's prior state is read from
@@ -82,7 +82,8 @@ def reconcile_profile_gateways(
         hermes_home: The container's HERMES_HOME (typically /opt/data).
             Profiles live under ``<hermes_home>/profiles/<name>/``;
             the default profile lives at ``<hermes_home>`` itself.
-        scandir: The s6 dynamic scandir (typically /run/service). Service
+        scandir: The s6 dynamic scandir (typically
+            /run/hermes-profile-services). Service
             directories are created at ``<scandir>/gateway-<profile>/``.
         dry_run: When True, walk and return the action list without
             touching the filesystem. For tests and `--dry-run` debug.
@@ -373,7 +374,6 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
 
     from hermes_cli.service_manager import (
         S6ServiceManager,
-        _seed_supervise_skeleton,
         validate_profile_name,
     )
 
@@ -416,17 +416,6 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
         # _dispatch_via_service_manager_if_s6 helper to `s6-svc -u`).
         if not start:
             (tmp_dir / "down").touch()
-
-        # Pre-create the supervise/ skeleton with hermes ownership
-        # BEFORE we publish the slot. Mirrors the same pre-creation
-        # step in S6ServiceManager.register_profile_gateway — when
-        # s6-svscan picks the published slot up, the s6-supervise it
-        # spawns will EEXIST our dirs/FIFOs and inherit hermes
-        # ownership, so runtime s6-svc / s6-svstat / s6-svwait calls
-        # (all dispatched as the hermes user) won't hit EACCES. See
-        # ``_seed_supervise_skeleton`` in service_manager.py for the
-        # full rationale.
-        _seed_supervise_skeleton(tmp_dir)
 
         # Publish atomically. Path.replace handles the existing-target
         # case the same way os.rename does on POSIX: the target is
@@ -509,7 +498,12 @@ def main() -> int:
         return 0
 
     hermes_home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
-    scandir = Path(os.environ.get("S6_PROFILE_GATEWAY_SCANDIR", "/run/service"))
+    scandir = Path(
+        os.environ.get(
+            "S6_PROFILE_GATEWAY_SCANDIR",
+            "/run/hermes-profile-services",
+        )
+    )
     actions = reconcile_profile_gateways(
         hermes_home=hermes_home, scandir=scandir,
     )

@@ -5881,6 +5881,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from hermes_cli.plugins import discover_plugins
             discover_plugins()
         except Exception:
+            if "HERMES_REQUIRED_BUNDLED_PLUGINS" in os.environ:
+                logger.critical(
+                    "plugin discovery failed while bundled plugins are required",
+                    exc_info=True,
+                )
+                raise
             logger.warning(
                 "plugin discovery failed at gateway startup", exc_info=True,
             )

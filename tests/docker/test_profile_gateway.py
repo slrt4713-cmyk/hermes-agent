@@ -41,7 +41,10 @@ def _svstat(container: str) -> str:
     """Returns the raw s6-svstat output for the test profile's slot.
     /command/s6-svstat is called by absolute path because /command/
     isn't on PATH for docker-exec sessions."""
-    r = _sh(container, f"/command/s6-svstat /run/service/gateway-{PROFILE}")
+    r = _sh(
+        container,
+        f"/command/s6-svstat /run/hermes-profile-services/gateway-{PROFILE}",
+    )
     return r.stdout if r.returncode == 0 else ""
 
 
@@ -80,7 +83,10 @@ def test_profile_create_then_gateway_start(
     assert r.returncode == 0, f"profile create failed: {r.stderr}"
 
     # Profile create's s6-register hook should have produced a service slot.
-    r = _sh(container_name, f"test -d /run/service/gateway-{PROFILE}")
+    r = _sh(
+        container_name,
+        f"test -d /run/hermes-profile-services/gateway-{PROFILE}",
+    )
     assert r.returncode == 0, "s6 service slot not created on profile create"
 
     r = _sh(container_name, f"hermes -p {PROFILE} gateway start", timeout=60)
@@ -134,5 +140,8 @@ def test_profile_delete_stops_gateway(
 
     time.sleep(2)
     # Service slot should be gone.
-    r = _sh(container_name, f"test -d /run/service/gateway-{PROFILE}")
+    r = _sh(
+        container_name,
+        f"test -d /run/hermes-profile-services/gateway-{PROFILE}",
+    )
     assert r.returncode != 0, "s6 service slot still present after profile delete"
