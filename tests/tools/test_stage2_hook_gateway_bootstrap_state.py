@@ -23,7 +23,6 @@ deliberately-stopped gateway must stay stopped across restarts).
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import tempfile
@@ -44,15 +43,18 @@ def stage2_text() -> str:
 
 def _seed_block(text: str) -> str:
     """Extract the gateway_state.json bootstrap block."""
-    start = text.index('if [ ! -f "$HERMES_HOME/gateway_state.json" ] && \\')
+    start = text.index(
+        'if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ] && \\\n'
+        '        [ ! -f "$HERMES_HOME/gateway_state.json" ] && \\'
+    )
     end = text.index("\n\n# --- Sync bundled skills ---", start)
     return text[start:end]
 
 
 def _auth_seed_block(text: str) -> str:
     start = text.index(
-        'if [ ! -f "$HERMES_HOME/auth.json" ] && '
-        '[ -n "${HERMES_AUTH_JSON_BOOTSTRAP:-}" ]; then'
+        'if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ] && \\\n'
+        '        [ ! -f "$HERMES_HOME/auth.json" ] && \\'
     )
     end = text.index("\n\n# gateway_state.json:", start)
     return text[start:end]

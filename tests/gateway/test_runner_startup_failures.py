@@ -65,6 +65,30 @@ class _SuccessfulAdapter(BasePlatformAdapter):
 
 
 @pytest.mark.asyncio
+async def test_required_plugin_generic_discovery_failure_stops_gateway(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv(
+        "HERMES_REQUIRED_BUNDLED_PLUGINS",
+        "hermes-audit",
+    )
+    config = GatewayConfig(platforms={}, sessions_dir=tmp_path / "sessions")
+    runner = GatewayRunner(config)
+
+    def fail_discovery():
+        raise OSError("simulated plugin scan failure")
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.discover_plugins",
+        fail_discovery,
+    )
+
+    with pytest.raises(OSError, match="simulated plugin scan failure"):
+        await runner.start()
+
+
+@pytest.mark.asyncio
 async def test_runner_stays_alive_for_retryable_startup_errors(monkeypatch, tmp_path):
     """Retryable startup errors should leave the gateway running in
     degraded mode so the reconnect watcher can recover the platform when
