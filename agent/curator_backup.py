@@ -19,7 +19,9 @@ It DOES include:
   - ``.archive/`` (so rollback restores previously-archived skills too)
   - ``.curator_state`` (so rolling back also restores the last-run-at
     pointer — otherwise the curator would immediately re-fire on the next
-    tick)
+    tick). When ``HERMES_CURATOR_STATE_PATH`` is configured, this state is
+    captured as a dedicated snapshot companion instead of inside the skills
+    archive.
   - ``.bundled_manifest`` (so protection markers stay consistent)
   - ``.curator_suppressed`` (so rollback restores the set of pruned built-ins
     the re-seeder must leave archived)
@@ -41,20 +43,28 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
+import stat
 import tarfile
+import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
 from agent.skill_utils import is_excluded_skill_path
+from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_KEEP = 5
+CURATOR_STATE_PATH_ENV = "HERMES_CURATOR_STATE_PATH"
+CURATOR_STATE_FILENAME = "curator-state.json"
+_LEGACY_CURATOR_STATE_NAME = ".curator_state"
+_MAX_CURATOR_STATE_BYTES = 1024 * 1024
 
 # Entries under skills/ that should NEVER be rolled up into a snapshot.
 # .hub/ is managed by the skills hub; rolling it back would break lockfile
@@ -81,6 +91,126 @@ def _cron_jobs_file() -> Path:
 
 
 CRON_JOBS_FILENAME = "cron-jobs.json"
+
+
+def _curator_state_override() -> Optional[Path]:
+    """Return the configured external curator state path, if any.
+
+    The override is intentionally strict. A relative or directory path could
+    silently put mutable state back into a managed skills tree, or make
+    snapshot restore behavior depend on the process working directory.
+    """
+    raw = os.environ.get(CURATOR_STATE_PATH_ENV)
+    if raw is None:
+        return None
+
+    raw = raw.strip()
+    if not raw:
+        raise ValueError(
+            f"{CURATOR_STATE_PATH_ENV} must be a non-empty absolute file path"
+        )
+
+    path = Path(raw)
+    if not path.is_absolute() or not path.name:
+        raise ValueError(
+            f"{CURATOR_STATE_PATH_ENV} must be an absolute file path, "
+            f"got {raw!r}"
+        )
+    if any(candidate.is_symlink() for candidate in (path, *path.parents)):
+        raise ValueError(
+            f"{CURATOR_STATE_PATH_ENV} must not use symlinks, got {raw!r}"
+        )
+
+    skills = _skills_dir()
+    try:
+        resolved_path = path.resolve(strict=False)
+        resolved_skills = skills.resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(
+            f"{CURATOR_STATE_PATH_ENV} could not be resolved safely: {e}"
+        ) from e
+    if path.is_relative_to(skills) or resolved_path.is_relative_to(
+        resolved_skills
+    ):
+        raise ValueError(
+            f"{CURATOR_STATE_PATH_ENV} must be outside the skills directory, "
+            f"got {raw!r}"
+        )
+    if path.exists() and not path.is_file():
+        raise ValueError(
+            f"{CURATOR_STATE_PATH_ENV} must point to a file, got {raw!r}"
+        )
+    return path
+
+
+def _backup_curator_state_into(
+    dest: Path, state_path: Path
+) -> Dict[str, Any]:
+    """Capture external curator state alongside the skills archive."""
+    info: Dict[str, Any] = {
+        "external": True,
+        "backed_up": False,
+    }
+    if not state_path.exists():
+        info["reason"] = "no curator state file present"
+        return info
+
+    try:
+        size = state_path.stat().st_size
+        if size > _MAX_CURATOR_STATE_BYTES:
+            raise OSError(
+                f"curator state exceeds {_MAX_CURATOR_STATE_BYTES} bytes"
+            )
+        shutil.copy2(state_path, dest / CURATOR_STATE_FILENAME)
+    except OSError as e:
+        raise OSError(f"failed to capture external curator state: {e}") from e
+
+    info["backed_up"] = True
+    info["bytes"] = size
+    return info
+
+
+def _atomic_restore_curator_state(
+    state_path: Path, content: Optional[bytes]
+) -> None:
+    """Atomically restore external state, or remove it when absent in backup."""
+    if content is None:
+        try:
+            state_path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_mode: Optional[int] = None
+    try:
+        if state_path.exists():
+            previous_mode = stat.S_IMODE(state_path.stat().st_mode)
+    except OSError:
+        previous_mode = None
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(state_path.parent),
+        prefix=f".{state_path.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        real_path = Path(atomic_replace(tmp_name, state_path))
+        if previous_mode is not None:
+            try:
+                real_path.chmod(previous_mode)
+            except OSError:
+                pass
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _backup_cron_jobs_into(dest: Path) -> Dict[str, Any]:
@@ -183,9 +313,14 @@ def _count_skill_files(base: Path) -> int:
         return 0
 
 
-def _write_manifest(dest: Path, reason: str, archive_path: Path,
-                    skills_counted: int,
-                    cron_info: Optional[Dict[str, Any]] = None) -> None:
+def _write_manifest(
+    dest: Path,
+    reason: str,
+    archive_path: Path,
+    skills_counted: int,
+    cron_info: Optional[Dict[str, Any]] = None,
+    curator_state_info: Optional[Dict[str, Any]] = None,
+) -> None:
     manifest = {
         "id": dest.name,
         "reason": reason,
@@ -203,6 +338,8 @@ def _write_manifest(dest: Path, reason: str, archive_path: Path,
             manifest["cron_jobs"]["reason"] = cron_info.get("reason", "not captured")
         if cron_info.get("parse_warning"):
             manifest["cron_jobs"]["parse_warning"] = cron_info["parse_warning"]
+    if curator_state_info is not None:
+        manifest["curator_state"] = dict(curator_state_info)
     (dest / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -224,6 +361,7 @@ def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] =
         logger.debug("Curator backup disabled by config; skipping snapshot")
         return None
 
+    state_override = _curator_state_override()
     skills = _skills_dir()
     if not skills.exists():
         logger.debug("No ~/.hermes/skills/ directory — nothing to back up")
@@ -260,6 +398,11 @@ def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] =
             for entry in sorted(skills.iterdir()):
                 if entry.name in _EXCLUDE_TOP_LEVEL:
                     continue
+                if (
+                    state_override is not None
+                    and entry.name == _LEGACY_CURATOR_STATE_NAME
+                ):
+                    continue
                 # arcname: store paths relative to skills/ so extraction
                 # drops cleanly back into the skills dir.
                 tf.add(str(entry), arcname=entry.name, recursive=True)
@@ -268,9 +411,15 @@ def snapshot_skills(reason: str = "manual", *, protect_ids: Optional[Set[str]] =
         # additive. We still record in the manifest whether it was
         # captured so rollback can surface "no cron data in this snapshot".
         cron_info = _backup_cron_jobs_into(dest)
+        curator_state_info = (
+            _backup_curator_state_into(dest, state_override)
+            if state_override is not None
+            else None
+        )
         _write_manifest(dest, reason, archive,
                         _count_skill_files(skills),
-                        cron_info=cron_info)
+                        cron_info=cron_info,
+                        curator_state_info=curator_state_info)
     except (OSError, tarfile.TarError) as e:
         logger.debug("Curator snapshot failed: %s", e, exc_info=True)
         # Clean up partial snapshot
@@ -391,6 +540,172 @@ def _resolve_backup(backup_id: Optional[str]) -> Optional[Path]:
         if c.is_dir() and _ID_RE.match(c.name) and (c / "skills.tar.gz").exists()
     ]
     return candidates[0] if candidates else None
+
+
+def _normalized_tar_member_parts(name: str) -> Tuple[str, ...]:
+    """Return canonical POSIX components for a safe relative tar member."""
+    if not name or "\x00" in name:
+        raise tarfile.TarError(f"refusing unsafe archive path: {name!r}")
+    path = PurePosixPath(name)
+    parts = tuple(part for part in path.parts if part not in {"", "."})
+    if path.is_absolute() or not parts or ".." in parts:
+        raise tarfile.TarError(f"refusing unsafe archive path: {name!r}")
+    return parts
+
+
+def _extract_tar_members_safely(
+    tf: tarfile.TarFile,
+    destination: Path,
+    members: List[tarfile.TarInfo],
+) -> None:
+    """Extract with the stdlib data filter, or a strict no-link fallback."""
+    if callable(getattr(tarfile, "data_filter", None)):
+        try:
+            tf.extractall(
+                str(destination),
+                members=members,
+                filter="data",
+            )
+        except TypeError as e:
+            raise tarfile.TarError(
+                "safe tar extraction filter could not be applied"
+            ) from e
+        return
+
+    for member in members:
+        if not (member.isfile() or member.isdir()):
+            raise tarfile.TarError(
+                "safe tar extraction filter unavailable; refusing "
+                f"non-regular member {member.name!r}"
+            )
+    tf.extractall(str(destination), members=members)
+
+
+def _snapshot_uses_external_curator_state(snapshot_dir: Path) -> bool:
+    manifest = _read_manifest(snapshot_dir)
+    info = manifest.get("curator_state")
+    companion = snapshot_dir / CURATOR_STATE_FILENAME
+    return (
+        isinstance(info, dict)
+        and bool(info.get("external"))
+    ) or companion.exists() or companion.is_symlink()
+
+
+def _read_snapshot_curator_state(
+    snapshot_dir: Path,
+    archive: Path,
+    state_override: Optional[Path],
+) -> Optional[bytes]:
+    """Load state to restore when an external path is configured.
+
+    New snapshots use a regular companion file. Legacy snapshots stored state
+    as ``.curator_state`` inside the skills tarball; rollback may migrate that
+    one member to the explicit external path without extracting it into the
+    managed skills directory.
+    """
+    uses_external = _snapshot_uses_external_curator_state(snapshot_dir)
+    if state_override is None:
+        if uses_external:
+            raise ValueError(
+                f"snapshot requires {CURATOR_STATE_PATH_ENV} to restore "
+                "its external curator state"
+            )
+        return None
+
+    manifest = _read_manifest(snapshot_dir)
+    info = manifest.get("curator_state")
+    companion = snapshot_dir / CURATOR_STATE_FILENAME
+    if companion.exists() or companion.is_symlink():
+        if companion.is_symlink() or not companion.is_file():
+            raise tarfile.TarError(
+                f"unsafe curator state companion: {companion.name}"
+            )
+        size = companion.stat().st_size
+        if size > _MAX_CURATOR_STATE_BYTES:
+            raise tarfile.TarError(
+                f"curator state companion exceeds {_MAX_CURATOR_STATE_BYTES} bytes"
+            )
+        return companion.read_bytes()
+
+    if (
+        isinstance(info, dict)
+        and info.get("external")
+        and info.get("backed_up")
+    ):
+        raise tarfile.TarError(
+            f"snapshot manifest references missing {CURATOR_STATE_FILENAME}"
+        )
+    if isinstance(info, dict) and info.get("external"):
+        return None
+
+    with tarfile.open(archive, "r:gz") as tf:
+        normalized_members = [
+            (member, _normalized_tar_member_parts(member.name))
+            for member in tf.getmembers()
+        ]
+        matches = [
+            member
+            for member, parts in normalized_members
+            if parts == (_LEGACY_CURATOR_STATE_NAME,)
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1 or not matches[0].isfile():
+            raise tarfile.TarError(
+                "legacy curator state archive member is not a single regular file"
+            )
+        member = matches[0]
+        if member.size > _MAX_CURATOR_STATE_BYTES:
+            raise tarfile.TarError(
+                f"legacy curator state exceeds {_MAX_CURATOR_STATE_BYTES} bytes"
+            )
+        extracted = tf.extractfile(member)
+        if extracted is None:
+            raise tarfile.TarError("failed to read legacy curator state")
+        content = extracted.read(_MAX_CURATOR_STATE_BYTES + 1)
+        if len(content) > _MAX_CURATOR_STATE_BYTES:
+            raise tarfile.TarError(
+                f"legacy curator state exceeds {_MAX_CURATOR_STATE_BYTES} bytes"
+            )
+        return content
+
+
+def _restore_staged_skills(
+    skills: Path,
+    moved: List[Tuple[Path, Path]],
+    staged: Path,
+) -> List[str]:
+    """Best-effort restoration of the exact pre-rollback skills tree."""
+    errors: List[str] = []
+    try:
+        current_entries = list(skills.iterdir())
+    except OSError as e:
+        current_entries = []
+        errors.append(f"failed to inspect partially restored skills: {e}")
+
+    for entry in current_entries:
+        if entry.name in _EXCLUDE_TOP_LEVEL:
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError as e:
+            errors.append(f"failed to remove {entry.name}: {e}")
+
+    for original, staged_entry in moved:
+        try:
+            if staged_entry.exists() or staged_entry.is_symlink():
+                shutil.move(str(staged_entry), str(original))
+        except OSError as e:
+            errors.append(f"failed to restore {original.name}: {e}")
+
+    try:
+        shutil.rmtree(staged, ignore_errors=True)
+    except OSError as e:
+        errors.append(f"failed to remove rollback staging: {e}")
+    return errors
 
 
 def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
@@ -537,7 +852,7 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
 
 
 def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]]:
-    """Restore ``~/.hermes/skills/`` from a snapshot.
+    """Restore skills and curator state from a snapshot.
 
     Strategy:
       1. Resolve the target snapshot (explicit id or newest regular).
@@ -547,8 +862,10 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
       3. Move all current top-level entries (except ``.curator_backups``
          and ``.hub``) into a tempdir.
       4. Extract the chosen snapshot into ``~/.hermes/skills/``.
-      5. On failure during 4, move the tempdir contents back (best-effort)
-         and return failure.
+      5. With ``HERMES_CURATOR_STATE_PATH``, restore curator state to that
+         dedicated file and never extract ``.curator_state`` into skills.
+      6. On failure during 4 or 5, restore the staged skills and external
+         state best-effort, then return failure.
 
     Returns ``(ok, message, snapshot_path)``.
     """
@@ -565,6 +882,16 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
     if not archive.exists():
         return (False, f"snapshot {target.name} has no skills.tar.gz — corrupted?", None)
 
+    try:
+        state_override = _curator_state_override()
+        snapshot_state = _read_snapshot_curator_state(
+            target,
+            archive,
+            state_override,
+        )
+    except (OSError, tarfile.TarError, ValueError) as e:
+        return (False, f"curator state restore preflight failed: {e}", None)
+
     skills = _skills_dir()
     skills.mkdir(parents=True, exist_ok=True)
     backups = _backups_dir()
@@ -577,12 +904,28 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
         # Protect the target from this snapshot's prune step: at the steady
         # keep limit, pruning the oldest snapshot would otherwise delete the
         # very snapshot we are about to extract from.
-        snapshot_skills(
+        safety_snapshot = snapshot_skills(
             reason=f"pre-rollback to {target.name}",
             protect_ids={target.name},
         )
+        if safety_snapshot is None:
+            return (False, "pre-rollback safety snapshot failed", None)
     except Exception as e:
         return (False, f"pre-rollback safety snapshot failed: {e}", None)
+
+    previous_state_exists = False
+    previous_state: Optional[bytes] = None
+    if state_override is not None:
+        try:
+            previous_state_exists = state_override.exists()
+            if previous_state_exists:
+                previous_state = state_override.read_bytes()
+        except OSError as e:
+            return (
+                False,
+                f"failed to preserve current external curator state: {e}",
+                None,
+            )
 
     # Additionally move current entries into an internal staging dir so
     # the extract happens into an empty skills tree (predictable result).
@@ -603,47 +946,82 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
             shutil.move(str(entry), str(dest))
             moved.append((entry, dest))
     except OSError as e:
-        # Best-effort rollback of the move
-        for orig, dest in moved:
+        recovery_errors = []
+        for original, staged_entry in reversed(moved):
             try:
-                shutil.move(str(dest), str(orig))
-            except OSError:
-                pass
+                shutil.move(str(staged_entry), str(original))
+            except OSError as recovery_error:
+                recovery_errors.append(
+                    f"failed to restore {original.name}: {recovery_error}"
+                )
         try:
             shutil.rmtree(staged, ignore_errors=True)
-        except OSError:
-            pass
-        return (False, f"failed to stage current skills: {e}", None)
+        except OSError as recovery_error:
+            recovery_errors.append(
+                f"failed to remove rollback staging: {recovery_error}"
+            )
+        suffix = (
+            f"; recovery errors: {', '.join(recovery_errors)}"
+            if recovery_errors
+            else ""
+        )
+        return (False, f"failed to stage current skills: {e}{suffix}", None)
 
     # Step 4: extract the snapshot into skills/
     try:
         with tarfile.open(archive, "r:gz") as tf:
-            # Python 3.12+ supports filter='data' for safer extraction.
-            # Fall back to the unfiltered call for older interpreters but
-            # still reject absolute paths and .. components defensively.
-            for member in tf.getmembers():
-                name = member.name
-                if name.startswith("/") or ".." in Path(name).parts:
+            members = tf.getmembers()
+            extract_members = []
+            for member in members:
+                parts = _normalized_tar_member_parts(member.name)
+                if parts[0] in _EXCLUDE_TOP_LEVEL:
                     raise tarfile.TarError(
-                        f"refusing to extract unsafe path: {name!r}"
+                        f"refusing to extract excluded path: {member.name!r}"
                     )
-            try:
-                tf.extractall(str(skills), filter="data")  # type: ignore[call-arg]
-            except TypeError:
-                # Python < 3.12 — no filter kwarg
-                tf.extractall(str(skills))
+                if (
+                    state_override is not None
+                    and parts[0] == _LEGACY_CURATOR_STATE_NAME
+                ):
+                    continue
+                extract_members.append(member)
+            _extract_tar_members_safely(tf, skills, extract_members)
     except (OSError, tarfile.TarError) as e:
-        # Best-effort recover: move staged contents back
-        for orig, dest in moved:
-            try:
-                shutil.move(str(dest), str(orig))
-            except OSError:
-                pass
+        recovery_errors = _restore_staged_skills(skills, moved, staged)
+        suffix = (
+            f"; recovery errors: {', '.join(recovery_errors)}"
+            if recovery_errors
+            else ""
+        )
+        return (
+            False,
+            f"snapshot extract failed (state restored): {e}{suffix}",
+            None,
+        )
+
+    if state_override is not None:
         try:
-            shutil.rmtree(staged, ignore_errors=True)
-        except OSError:
-            pass
-        return (False, f"snapshot extract failed (state restored): {e}", None)
+            _atomic_restore_curator_state(state_override, snapshot_state)
+        except OSError as e:
+            recovery_errors = _restore_staged_skills(skills, moved, staged)
+            try:
+                _atomic_restore_curator_state(
+                    state_override,
+                    previous_state if previous_state_exists else None,
+                )
+            except OSError as recovery_error:
+                recovery_errors.append(
+                    f"failed to restore external curator state: {recovery_error}"
+                )
+            suffix = (
+                f"; recovery errors: {', '.join(recovery_errors)}"
+                if recovery_errors
+                else ""
+            )
+            return (
+                False,
+                f"external curator state restore failed: {e}{suffix}",
+                None,
+            )
 
     # Extract succeeded — the staging dir has served its purpose. The
     # user's undo handle is the safety snapshot tarball we took earlier.

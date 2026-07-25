@@ -10,7 +10,8 @@ Responsibilities:
   - Auto-transition lifecycle states based on derived skill activity timestamps
   - Spawn a background review agent that can pin / archive / consolidate /
     patch agent-created skills via skill_manage
-  - Persist curator state (last_run_at, paused, etc.) in .curator_state
+  - Persist curator state (last_run_at, paused, etc.) in .curator_state by
+    default, or at HERMES_CURATOR_STATE_PATH when explicitly configured
 
 Strict invariants:
   - Only touches agent-created skills (see tools/skill_usage.is_agent_created)
@@ -57,6 +58,7 @@ DEFAULT_INTERVAL_HOURS = 24 * 7  # 7 days
 DEFAULT_MIN_IDLE_HOURS = 2
 DEFAULT_STALE_AFTER_DAYS = 30
 DEFAULT_ARCHIVE_AFTER_DAYS = 90
+CURATOR_STATE_PATH_ENV = "HERMES_CURATOR_STATE_PATH"
 # Consolidation (the LLM umbrella-building fork) is OFF by default. The
 # deterministic inactivity prune (apply_automatic_transitions) still runs
 # whenever the curator is enabled; only the opinionated, aux-model-cost
@@ -69,6 +71,48 @@ DEFAULT_CONSOLIDATE = False
 # ---------------------------------------------------------------------------
 
 def _state_file() -> Path:
+    override = os.environ.get(CURATOR_STATE_PATH_ENV)
+    if override is not None:
+        override = override.strip()
+        if not override:
+            raise ValueError(
+                f"{CURATOR_STATE_PATH_ENV} must be a non-empty absolute file path"
+            )
+
+        path = Path(override)
+        if not path.is_absolute() or not path.name:
+            raise ValueError(
+                f"{CURATOR_STATE_PATH_ENV} must be an absolute file path, "
+                f"got {override!r}"
+            )
+        if any(candidate.is_symlink() for candidate in (path, *path.parents)):
+            raise ValueError(
+                f"{CURATOR_STATE_PATH_ENV} must not use symlinks, "
+                f"got {override!r}"
+            )
+
+        skills = get_hermes_home() / "skills"
+        try:
+            resolved_path = path.resolve(strict=False)
+            resolved_skills = skills.resolve(strict=False)
+        except (OSError, RuntimeError) as e:
+            raise ValueError(
+                f"{CURATOR_STATE_PATH_ENV} could not be resolved safely: {e}"
+            ) from e
+        if path.is_relative_to(skills) or resolved_path.is_relative_to(
+            resolved_skills
+        ):
+            raise ValueError(
+                f"{CURATOR_STATE_PATH_ENV} must be outside the skills directory, "
+                f"got {override!r}"
+            )
+        if path.exists() and not path.is_file():
+            raise ValueError(
+                f"{CURATOR_STATE_PATH_ENV} must point to a file, "
+                f"got {override!r}"
+            )
+        return path
+
     return get_hermes_home() / "skills" / ".curator_state"
 
 
