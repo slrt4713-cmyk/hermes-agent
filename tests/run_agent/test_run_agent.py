@@ -1146,9 +1146,9 @@ class TestBuildSystemPrompt:
         tools = _make_tool_defs("web_search", "skills_list", "skill_view", "skill_manage")
         toolset_map = {
             "web_search": "web",
-            "skills_list": "skills",
-            "skill_view": "skills",
-            "skill_manage": "skills",
+            "skills_list": "skills_read",
+            "skill_view": "skills_read",
+            "skill_manage": "skills_manage",
         }
 
         with (
@@ -1173,7 +1173,11 @@ class TestBuildSystemPrompt:
 
         assert "SKILLS_PROMPT" in prompt
         assert mock_skills.call_args.kwargs["available_tools"] == set(toolset_map)
-        assert mock_skills.call_args.kwargs["available_toolsets"] == {"web", "skills"}
+        assert mock_skills.call_args.kwargs["available_toolsets"] == {
+            "web",
+            "skills_read",
+            "skills_manage",
+        }
 
 
 class TestToolUseEnforcementConfig:

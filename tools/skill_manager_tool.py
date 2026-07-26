@@ -1216,7 +1216,7 @@ from tools.registry import registry, tool_error
 
 registry.register(
     name="skill_manage",
-    toolset="skills",
+    toolset="skills_manage",
     schema=SKILL_MANAGE_SCHEMA,
     handler=lambda args, **kw: skill_manage(
         action=args.get("action", ""),
