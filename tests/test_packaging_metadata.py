@@ -265,3 +265,19 @@ def test_locale_catalogs_ship_in_both_wheel_and_sdist():
     on_disk = list((REPO_ROOT / "locales").glob("*.yaml"))
     assert on_disk, "expected locales/*.yaml catalogs on disk"
 
+
+def test_zoom_mcp_ships_in_wheel_and_sdist():
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    data_files = data["tool"]["setuptools"].get("data-files", {})
+    assert data_files.get("optional-mcps/zoom") == [
+        "optional-mcps/zoom/manifest.yaml"
+    ]
+    assert data_files.get("skills/productivity/meeting-capture") == [
+        "skills/productivity/meeting-capture/SKILL.md"
+    ]
+    assert data["project"]["scripts"]["hermes-zoom-mcp"] == (
+        "hermes_cli.zoom_mcp:main"
+    )
+
+    manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    assert "graft optional-mcps" in manifest
