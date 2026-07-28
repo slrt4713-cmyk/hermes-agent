@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+package_bin="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+runtime_python="${HERMES_PYTHON:-/opt/hermes/.venv/bin/python}"
+exec "$runtime_python" "$package_bin/../lib/zoom_mcp.py" "$@"

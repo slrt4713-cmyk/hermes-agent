@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "kind": "hermes-mcp-package-source",
+  "name": "zoom",
+  "version": "0.1.0",
+  "platform": "linux-amd64",
+  "server": {
+    "command": "${PACKAGE_ROOT}/bin/hermes-zoom-mcp",
+    "args": []
+  },
+  "tools": [
+    "meetings_list",
+    "meetings_get",
+    "recordings_list",
+    "recordings_get",
+    "recordings_transcript"
+  ],
+  "required_env": [
+    "ZOOM_ACCOUNT_ID",
+    "ZOOM_CLIENT_ID",
+    "ZOOM_CLIENT_SECRET",
+    "ZOOM_USER_ID"
+  ],
+  "egress_hosts": [
+    "api.zoom.us",
+    "zoom.us",
+    "*.zoom.us"
+  ],
+  "build": {
+    "files": [
+      {
+        "source": "mcp-packages/zoom/hermes-zoom-mcp",
+        "target": "bin/hermes-zoom-mcp",
+        "mode": "0755"
+      },
+      {
+        "source": "hermes_cli/zoom_mcp.py",
+        "target": "lib/zoom_mcp.py",
+        "mode": "0644"
+      }
+    ]
+  }
+}
