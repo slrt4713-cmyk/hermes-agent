@@ -58,6 +58,10 @@ EOF
     exit 1
 fi
 
+if [ "$cur_uid" = 0 ]; then
+    exec s6-setuidgid hermes "$0" "$@"
+fi
+
 # HOME comes through with-contenv as /root (the /init context). Override
 # to the hermes user's home before dropping privileges so libraries that
 # resolve paths via $HOME (e.g. discord lockfile under XDG_STATE_HOME)

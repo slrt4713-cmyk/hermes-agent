@@ -7,6 +7,7 @@ from unittest.mock import ANY, call, patch
 from model_tools import (
     handle_function_call,
     get_all_tool_names,
+    get_tool_definitions,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
@@ -277,6 +278,18 @@ class TestBackwardCompat:
         assert isinstance(result, str)
 
 
+
+    def test_read_only_skills_toolset_excludes_management(self):
+        definitions = get_tool_definitions(
+            enabled_toolsets=["skills_read"],
+            disabled_toolsets=["skills_manage"],
+            quiet_mode=True,
+        )
+        names = {
+            definition["function"]["name"]
+            for definition in definitions
+        }
+        assert names == {"skills_list", "skill_view"}
 
 
 # =========================================================================

@@ -68,6 +68,18 @@ class TestResolveToolset:
         assert "web_search" in tools
         assert "web_extract" in tools
 
+    def test_skills_read_is_separate_from_skill_management(self):
+        assert set(resolve_toolset("skills_read")) == {
+            "skills_list",
+            "skill_view",
+        }
+        assert resolve_toolset("skills_manage") == ["skill_manage"]
+        assert set(resolve_toolset("skills")) == {
+            "skills_list",
+            "skill_view",
+            "skill_manage",
+        }
+
     def test_cycle_detection(self):
         # Create a cycle: A includes B, B includes A
         TOOLSETS["_cycle_a"] = {"description": "test", "tools": ["t1"], "includes": ["_cycle_b"]}

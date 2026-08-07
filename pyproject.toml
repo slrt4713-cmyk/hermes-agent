@@ -349,6 +349,7 @@ build-backend = "setuptools.build_meta"
 hermes = "hermes_cli.main:main"
 hermes-agent = "run_agent:main"
 hermes-acp = "acp_adapter.entry:main"
+hermes-zoom-mcp = "hermes_cli.zoom_mcp:main"
 
 [tool.uv]
 override-dependencies = [

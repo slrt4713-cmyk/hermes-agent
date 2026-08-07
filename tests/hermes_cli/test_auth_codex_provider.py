@@ -104,6 +104,56 @@ def test_resolve_codex_runtime_credentials_falls_back_to_pool_when_singleton_emp
     assert resolved["base_url"]  # default codex backend URL
 
 
+def test_v39_auth_store_resolves_without_reauthentication_or_rewrite(
+    tmp_path, monkeypatch
+):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True)
+    auth_file = hermes_home / "auth.json"
+    auth_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "active_provider": "openai-codex",
+                "providers": {
+                    "openai-codex": {
+                        "tokens": {
+                            "access_token": "v39-access",
+                            "refresh_token": "v39-refresh",
+                        },
+                        "last_refresh": "2026-08-07T00:00:00Z",
+                        "auth_mode": "chatgpt",
+                    }
+                },
+                "credential_pool": {
+                    "openai-codex": [
+                        {
+                            "id": "v39-device-code",
+                            "source": "device_code",
+                            "auth_type": "oauth",
+                            "access_token": "v39-access",
+                            "refresh_token": "v39-refresh",
+                            "last_status": "ok",
+                        }
+                    ]
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    original = auth_file.read_bytes()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-codex"))
+
+    first = resolve_codex_runtime_credentials()
+    second = resolve_codex_runtime_credentials()
+
+    assert first["api_key"] == "v39-access"
+    assert second["api_key"] == "v39-access"
+    assert auth_file.read_bytes() == original
+
+
 
 
 def test_save_codex_tokens_syncs_credential_pool(tmp_path, monkeypatch):
@@ -607,7 +657,6 @@ def _patch_httpx_post(monkeypatch, responses):
             return next(seq)
 
     monkeypatch.setattr("hermes_cli.auth.httpx.Client", lambda *a, **k: _FakeClient())
-
 
 
 

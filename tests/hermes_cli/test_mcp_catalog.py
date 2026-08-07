@@ -186,12 +186,16 @@ class TestInstall:
         monkeypatch.setattr(mcp_catalog, "_prompt_input", lambda *a, **kw: "secret-val")
 
         from hermes_cli.mcp_catalog import install_entry
-        from hermes_cli.config import get_env_value, load_config
+        from hermes_cli.config import get_config_path, get_env_value, load_config
 
         install_entry(_entry("demo"), enable=True)
 
         assert get_env_value("DEMO_KEY") == "secret-val"
-        assert "demo" in load_config()["mcp_servers"]
+        server = load_config()["mcp_servers"]["demo"]
+        assert server["env"] == {"DEMO_KEY": "secret-val"}
+        config_text = get_config_path().read_text(encoding="utf-8")
+        assert "${DEMO_KEY}" in config_text
+        assert "secret-val" not in config_text
 
 
 

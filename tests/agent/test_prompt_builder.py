@@ -282,6 +282,25 @@ class TestBuildSkillsSystemPrompt:
 
 
 
+    def test_read_only_skill_index_does_not_offer_skill_management(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "daily-brief"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: daily-brief\ndescription: Prepare a daily brief\n---\n"
+        )
+
+        result = build_skills_system_prompt(
+            available_tools={"skills_list", "skill_view"},
+            available_toolsets={"skills_read"},
+        )
+
+        assert "daily-brief" in result
+        assert "Skills are read-only in this session." in result
+        assert "skill_manage(action='patch')" not in result
+
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         cat_dir = tmp_path / "skills" / "tools"
@@ -919,5 +938,4 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 

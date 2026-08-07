@@ -51,6 +51,47 @@ _SECRET_SOURCE_VALUES_BY_HOME: dict[str, dict[str, str]] = {}
 _APPLIED_HOMES: set[str] = set()
 _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
 
+# These values define the hosted process boundary. Mutable dotenv files and
+# external secret providers may supply credentials, but they cannot replace
+# container policy selected by the operator.
+_PROCESS_POLICY_ENV_VARS = (
+    "HERMES_AUDIT_KEY_FILE",
+    "HERMES_AUDIT_SOCKET",
+    "HERMES_BUNDLED_PLUGINS",
+    "HERMES_CURATOR_STATE_PATH",
+    "HERMES_GID",
+    "HERMES_HOSTED_IMMUTABLE_RUNTIME",
+    "HERMES_REQUIRED_BUNDLED_PLUGINS",
+    "HERMES_REQUIRED_BUNDLED_PLUGINS_ROOT",
+    "HERMES_RUNTIME_CREDENTIALS_FILE",
+    "HERMES_SKIP_CONFIG_MIGRATION",
+    "HERMES_UID",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "NODE_USE_ENV_PROXY",
+    "S6_READ_ONLY_ROOT",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+_MISSING_ENV_VALUE = object()
+
+
+def _capture_process_policy_env() -> dict[str, str | object]:
+    return {
+        name: os.environ.get(name, _MISSING_ENV_VALUE)
+        for name in _PROCESS_POLICY_ENV_VARS
+    }
+
+
+def _restore_process_policy_env(snapshot: dict[str, str | object]) -> None:
+    for name, value in snapshot.items():
+        if value is _MISSING_ENV_VALUE:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = str(value)
+
 
 def _known_hermes_env_keys() -> set[str]:
     """Return the combined set of known Hermes env-var keys.
@@ -473,6 +514,7 @@ def load_hermes_dotenv(
     - if no user env exists, the project `.env` also overrides stale shell vars.
     """
     loaded: list[Path] = []
+    process_policy_env = _capture_process_policy_env()
 
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
     user_env = home_path / ".env"
@@ -484,33 +526,30 @@ def load_hermes_dotenv(
     if project_env_path and project_env_path.exists():
         _sanitize_env_file_if_needed(project_env_path)
 
-    if user_env.exists():
-        _load_dotenv_with_fallback(user_env, override=True)
-        loaded.append(user_env)
-        # Mirror reload_env() known-key cleanup so inherited Hermes keys
-        # absent from this profile's .env do not leak into the runtime.
-        _clear_known_keys_missing_from_dotenv(user_env)
+    try:
+        if user_env.exists():
+            _load_dotenv_with_fallback(user_env, override=True)
+            loaded.append(user_env)
+            # Mirror reload_env() known-key cleanup so inherited Hermes keys
+            # absent from this profile's .env do not leak into the runtime.
+            _clear_known_keys_missing_from_dotenv(user_env)
 
-    # Load .op.env AFTER .env so that .env values win, but the bootstrap
-    # token (OP_SERVICE_ACCOUNT_TOKEN) becomes available for
-    # apply_onepassword_secrets() even in cron / subprocess environments
-    # that inherit no shell state (no systemd EnvironmentFile, no op run).
-    # .op.env is gitignored — the service-account token never enters the
-    # committed .env file.
-    # Users on systemd can alternatively use:
-    #   EnvironmentFile=-/path/to/.hermes/.op.env
-    # in their gateway unit, which takes precedence (override=False below
-    # ensures .op.env never clobbers a token already in the environment).
-    op_env = home_path / ".op.env"
-    if op_env.exists() and not os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
-        _load_dotenv_with_fallback(op_env, override=False)
+        # Load .op.env after .env so that .env values win, but the bootstrap
+        # token becomes available in cron and subprocess environments.
+        op_env = home_path / ".op.env"
+        if op_env.exists() and not os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
+            _load_dotenv_with_fallback(op_env, override=False)
 
-    if project_env_path and project_env_path.exists():
-        _load_dotenv_with_fallback(project_env_path, override=not loaded)
-        loaded.append(project_env_path)
+        if project_env_path and project_env_path.exists():
+            _load_dotenv_with_fallback(project_env_path, override=not loaded)
+            loaded.append(project_env_path)
 
-    _apply_external_secret_sources(home_path)
-    _apply_managed_env()
+        _restore_process_policy_env(process_policy_env)
+        _apply_external_secret_sources(home_path)
+        _restore_process_policy_env(process_policy_env)
+        _apply_managed_env()
+    finally:
+        _restore_process_policy_env(process_policy_env)
 
     # config.yaml is the documented source of truth for terminal.* settings,
     # but the dotenv loads above run with override=True — so a stale

@@ -249,7 +249,6 @@ def test_pyproject_pins_are_internally_consistent():
 
 
 
-
 def _lazy_deps_by_feature():
     """Parse LAZY_DEPS into {feature_name: [spec, ...]} via AST.
 
@@ -340,3 +339,14 @@ def test_security_pins_present_in_mirrored_lazy_features():
         "pyproject extras — the lazy install path would not enforce the "
         "CVE-patched floor:\n  " + "\n  ".join(problems)
     )
+
+
+def test_zoom_mcp_runtime_artifacts_are_registered():
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["scripts"]["hermes-zoom-mcp"] == (
+        "hermes_cli.zoom_mcp:main"
+    )
+    assert (REPO_ROOT / "optional-mcps" / "zoom" / "manifest.yaml").is_file()
+    assert (
+        REPO_ROOT / "skills" / "productivity" / "meeting-capture" / "SKILL.md"
+    ).is_file()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ def backup_env(monkeypatch, tmp_path):
     home.mkdir()
     (home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_CURATOR_STATE_PATH", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     # Reload so get_hermes_home picks up the env var fresh.
@@ -40,12 +42,152 @@ def _write_skill(skills_dir: Path, name: str, body: str = "body") -> Path:
     return d
 
 
+def _add_tar_file(
+    archive: tarfile.TarFile,
+    name: str,
+    content: bytes,
+) -> None:
+    member = tarfile.TarInfo(name)
+    member.size = len(content)
+    archive.addfile(member, io.BytesIO(content))
+
+
 # ---------------------------------------------------------------------------
 # snapshot_skills
 # ---------------------------------------------------------------------------
 
 
 
+def test_snapshot_default_keeps_curator_state_in_skills_archive(backup_env):
+    cb = backup_env["cb"]
+    legacy_state = backup_env["skills"] / ".curator_state"
+    legacy_state.write_text('{"run_count": 2}', encoding="utf-8")
+
+    snap = cb.snapshot_skills(reason="default-state")
+
+    assert snap is not None
+    with tarfile.open(snap / "skills.tar.gz") as tf:
+        assert ".curator_state" in tf.getnames()
+    assert not (snap / cb.CURATOR_STATE_FILENAME).exists()
+    manifest = json.loads((snap / "manifest.json").read_text(encoding="utf-8"))
+    assert "curator_state" not in manifest
+
+
+def test_snapshot_captures_external_curator_state_without_moving_it(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 4}', encoding="utf-8")
+    stale_legacy = backup_env["skills"] / ".curator_state"
+    stale_legacy.write_text('{"run_count": 1}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+
+    snap = cb.snapshot_skills(reason="external-state")
+
+    assert snap is not None
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 4}'
+    assert stale_legacy.exists(), "snapshot must not migrate or delete live files"
+    assert (snap / cb.CURATOR_STATE_FILENAME).read_text(
+        encoding="utf-8"
+    ) == '{"run_count": 4}'
+    with tarfile.open(snap / "skills.tar.gz") as tf:
+        assert ".curator_state" not in tf.getnames()
+    manifest = json.loads((snap / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["curator_state"] == {
+        "backed_up": True,
+        "bytes": len(b'{"run_count": 4}'),
+        "external": True,
+    }
+
+
+@pytest.mark.parametrize("override", ["", "state.json", "curator/state.json", "/"])
+def test_snapshot_rejects_unsafe_curator_state_override(
+    backup_env, monkeypatch, override
+):
+    cb = backup_env["cb"]
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", override)
+
+    with pytest.raises(ValueError, match="absolute file path"):
+        cb.snapshot_skills(reason="invalid-override")
+
+    assert not (backup_env["skills"] / ".curator_backups").exists()
+
+
+def test_snapshot_rejects_curator_state_directly_under_skills(
+    backup_env, monkeypatch
+):
+    cb = backup_env["cb"]
+    override = backup_env["skills"] / "curator-state.json"
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(override))
+
+    with pytest.raises(ValueError, match="outside the skills directory"):
+        cb.snapshot_skills(reason="invalid-override")
+
+
+def test_snapshot_rejects_lexical_curator_state_path_under_skills(
+    backup_env, monkeypatch
+):
+    cb = backup_env["cb"]
+    override = (
+        backup_env["skills"]
+        / ".."
+        / "curator"
+        / "state.json"
+    )
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(override))
+
+    with pytest.raises(ValueError, match="outside the skills directory"):
+        cb.snapshot_skills(reason="invalid-override")
+
+
+def test_snapshot_rejects_symlinked_parent_resolving_into_skills(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    linked_skills = tmp_path / "linked-skills"
+    linked_skills.symlink_to(
+        backup_env["skills"],
+        target_is_directory=True,
+    )
+    monkeypatch.setenv(
+        "HERMES_CURATOR_STATE_PATH",
+        str(linked_skills / "state.json"),
+    )
+
+    with pytest.raises(ValueError, match="must not use symlinks"):
+        cb.snapshot_skills(reason="invalid-override")
+
+
+def test_snapshot_rejects_symlinked_curator_state_file(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    real_state = tmp_path / "real-state.json"
+    real_state.write_text("{}", encoding="utf-8")
+    linked_state = tmp_path / "linked-state.json"
+    linked_state.symlink_to(real_state)
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(linked_state))
+
+    with pytest.raises(ValueError, match="must not use symlinks"):
+        cb.snapshot_skills(reason="invalid-override")
+
+
+def test_snapshot_excludes_backups_dir_itself(backup_env):
+    """The backup must NOT contain .curator_backups/, which would recurse
+    with every subsequent snapshot and balloon disk usage."""
+    cb = backup_env["cb"]
+    _write_skill(backup_env["skills"], "alpha")
+    snap1 = cb.snapshot_skills(reason="first")
+    assert snap1 is not None
+    snap2 = cb.snapshot_skills(reason="second")
+    assert snap2 is not None
+    with tarfile.open(snap2 / "skills.tar.gz") as tf:
+        names = tf.getnames()
+    assert not any(n.startswith(".curator_backups") for n in names), (
+        "second snapshot must not contain the first snapshot recursively"
+    )
 
 
 
@@ -98,6 +240,151 @@ def test_snapshot_prunes_to_keep_count(backup_env, monkeypatch):
 # rollback
 # ---------------------------------------------------------------------------
 
+
+
+def test_rollback_restores_external_state_without_polluting_skills(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 1}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+    _write_skill(skills, "before")
+    snap = cb.snapshot_skills(reason="external-v1")
+    assert snap is not None
+
+    external_state.write_text('{"run_count": 9}', encoding="utf-8")
+    (skills / ".curator_state").write_text(
+        '{"stale": true}',
+        encoding="utf-8",
+    )
+    _write_skill(skills, "after")
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert ok, msg
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 1}'
+    assert not (skills / ".curator_state").exists()
+    assert (skills / "before").exists()
+    assert not (skills / "after").exists()
+
+
+def test_rollback_redirects_legacy_state_to_external_override(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    legacy_state = skills / ".curator_state"
+    legacy_state.write_text('{"run_count": 3}', encoding="utf-8")
+    snap = cb.snapshot_skills(reason="legacy-state")
+    assert snap is not None
+
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 8}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+    legacy_state.write_text('{"stale": true}', encoding="utf-8")
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert ok, msg
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 3}'
+    assert not legacy_state.exists()
+
+
+def test_rollback_external_snapshot_requires_explicit_override(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 1}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+    _write_skill(skills, "snapshot-skill")
+    snap = cb.snapshot_skills(reason="external-state")
+    assert snap is not None
+
+    monkeypatch.delenv("HERMES_CURATOR_STATE_PATH")
+    _write_skill(skills, "live-skill")
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert not ok
+    assert "HERMES_CURATOR_STATE_PATH" in msg
+    assert (skills / "live-skill").exists()
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 1}'
+
+
+def test_rollback_rejects_symlinked_external_state_companion(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 1}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+    _write_skill(skills, "snapshot-skill")
+    snap = cb.snapshot_skills(reason="external-state")
+    assert snap is not None
+
+    companion = snap / cb.CURATOR_STATE_FILENAME
+    companion.unlink()
+    attacker_file = tmp_path / "attacker-state.json"
+    attacker_file.write_text('{"run_count": 999}', encoding="utf-8")
+    companion.symlink_to(attacker_file)
+    _write_skill(skills, "live-skill")
+    external_state.write_text('{"run_count": 7}', encoding="utf-8")
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert not ok
+    assert "unsafe curator state companion" in msg
+    assert (skills / "live-skill").exists()
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 7}'
+
+
+def test_rollback_external_state_write_failure_restores_live_state(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 1}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+    _write_skill(skills, "snapshot-skill")
+    snap = cb.snapshot_skills(reason="external-state")
+    assert snap is not None
+
+    external_state.write_text('{"run_count": 7}', encoding="utf-8")
+    _write_skill(skills, "live-skill")
+    original_restore = cb._atomic_restore_curator_state
+    calls = 0
+
+    def fail_first_restore(path, content):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("simulated external state write failure")
+        return original_restore(path, content)
+
+    monkeypatch.setattr(
+        cb,
+        "_atomic_restore_curator_state",
+        fail_first_restore,
+    )
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert not ok
+    assert "external curator state restore failed" in msg
+    assert (skills / "snapshot-skill").exists()
+    assert (skills / "live-skill").exists()
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 7}'
 
 
 def test_rollback_is_itself_undoable(backup_env):
@@ -161,6 +448,133 @@ def test_rollback_rejects_unsafe_tarball(backup_env, monkeypatch):
     ok, msg, _ = cb.rollback()
     assert not ok
     assert "unsafe" in msg.lower() or "refus" in msg.lower() or "extract" in msg.lower()
+    assert (skills / "alpha").exists()
+
+
+def test_rollback_normalizes_legacy_curator_state_member(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    _write_skill(skills, "original")
+    snap = cb.snapshot_skills(reason="legacy-state")
+    assert snap is not None
+
+    archive_path = snap / "skills.tar.gz"
+    archive_path.unlink()
+    with tarfile.open(archive_path, "w:gz") as archive:
+        _add_tar_file(
+            archive,
+            "././.curator_state",
+            b'{"run_count": 2}',
+        )
+        _add_tar_file(
+            archive,
+            "./original/SKILL.md",
+            b"restored",
+        )
+
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 9}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+    (skills / ".curator_state").write_text("stale", encoding="utf-8")
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert ok, msg
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 2}'
+    assert not (skills / ".curator_state").exists()
+
+
+def test_rollback_excludes_entire_legacy_curator_state_namespace(
+    backup_env, monkeypatch, tmp_path
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    _write_skill(skills, "original")
+    snap = cb.snapshot_skills(reason="adversarial-state-directory")
+    assert snap is not None
+
+    archive_path = snap / "skills.tar.gz"
+    archive_path.unlink()
+    with tarfile.open(archive_path, "w:gz") as archive:
+        _add_tar_file(
+            archive,
+            ".curator_state/child",
+            b"must-not-land-in-skills",
+        )
+        _add_tar_file(archive, "original/SKILL.md", b"restored")
+    (snap / cb.CURATOR_STATE_FILENAME).write_bytes(b'{"run_count": 2}')
+
+    external_state = tmp_path / "runtime-data" / "curator" / "state.json"
+    external_state.parent.mkdir(parents=True)
+    external_state.write_text('{"run_count": 9}', encoding="utf-8")
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(external_state))
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert ok, msg
+    assert external_state.read_text(encoding="utf-8") == '{"run_count": 2}'
+    assert not (skills / ".curator_state").exists()
+
+
+def test_rollback_rejects_tar_symlink_pivot(backup_env, tmp_path):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    _write_skill(skills, "live-skill")
+    snap = cb.snapshot_skills(reason="pivot")
+    assert snap is not None
+
+    archive_path = snap / "skills.tar.gz"
+    archive_path.unlink()
+    with tarfile.open(archive_path, "w:gz") as archive:
+        pivot = tarfile.TarInfo("pivot")
+        pivot.type = tarfile.SYMTYPE
+        pivot.linkname = ".."
+        archive.addfile(pivot)
+        _add_tar_file(archive, "pivot/escaped.txt", b"escaped")
+
+    escaped = backup_env["home"] / "escaped.txt"
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert not ok
+    assert "extract" in msg.lower() or "outside" in msg.lower()
+    assert not escaped.exists()
+    assert (skills / "live-skill").exists()
+
+
+@pytest.mark.parametrize(
+    ("member_type", "linkname"),
+    [
+        (tarfile.SYMTYPE, "regular.txt"),
+        (tarfile.LNKTYPE, "regular.txt"),
+    ],
+)
+def test_rollback_fallback_refuses_links_without_safe_filter(
+    backup_env, monkeypatch, member_type, linkname
+):
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    _write_skill(skills, "live-skill")
+    snap = cb.snapshot_skills(reason="fallback-link")
+    assert snap is not None
+
+    archive_path = snap / "skills.tar.gz"
+    archive_path.unlink()
+    with tarfile.open(archive_path, "w:gz") as archive:
+        _add_tar_file(archive, "regular.txt", b"regular")
+        link = tarfile.TarInfo("linked.txt")
+        link.type = member_type
+        link.linkname = linkname
+        archive.addfile(link)
+
+    monkeypatch.delattr(cb.tarfile, "data_filter", raising=False)
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+
+    assert not ok
+    assert "safe tar extraction filter unavailable" in msg
+    assert (skills / "live-skill").exists()
 
 
 # ---------------------------------------------------------------------------

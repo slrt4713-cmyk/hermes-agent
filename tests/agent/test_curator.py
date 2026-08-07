@@ -21,6 +21,7 @@ def curator_env(tmp_path, monkeypatch):
     (home / "skills").mkdir(parents=True)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_CURATOR_STATE_PATH", raising=False)
 
     import tools.skill_usage as usage
     importlib.reload(usage)
@@ -377,6 +378,118 @@ def test_run_review_synchronous_invokes_llm_stub(curator_env, monkeypatch):
 # Persistence
 # ---------------------------------------------------------------------------
 
+def test_state_file_defaults_to_skills_directory(curator_env):
+    c = curator_env["curator"]
+    assert c._state_file() == curator_env["home"] / "skills" / ".curator_state"
+
+
+def test_state_file_supports_absolute_override(curator_env, monkeypatch, tmp_path):
+    c = curator_env["curator"]
+    override = tmp_path / "curator" / "state.json"
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(override))
+
+    c.save_state({"paused": True, "run_count": 3})
+
+    assert c._state_file() == override
+    assert c.load_state()["paused"] is True
+    assert c.load_state()["run_count"] == 3
+    assert override.is_file()
+    assert not (
+        curator_env["home"] / "skills" / ".curator_state"
+    ).exists()
+
+
+@pytest.mark.parametrize("override", ["", "state.json", "curator/state.json", "/"])
+def test_state_file_rejects_unsafe_override(
+    curator_env, monkeypatch, override
+):
+    c = curator_env["curator"]
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", override)
+
+    with pytest.raises(ValueError, match="absolute file path"):
+        c._state_file()
+
+
+def test_state_file_rejects_direct_path_under_skills(
+    curator_env, monkeypatch
+):
+    c = curator_env["curator"]
+    override = curator_env["home"] / "skills" / "curator-state.json"
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(override))
+
+    with pytest.raises(ValueError, match="outside the skills directory"):
+        c._state_file()
+
+
+def test_state_file_rejects_lexical_path_starting_under_skills(
+    curator_env, monkeypatch
+):
+    c = curator_env["curator"]
+    override = (
+        curator_env["home"]
+        / "skills"
+        / ".."
+        / "curator"
+        / "state.json"
+    )
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(override))
+
+    with pytest.raises(ValueError, match="outside the skills directory"):
+        c._state_file()
+
+
+def test_state_file_rejects_symlinked_parent_resolving_into_skills(
+    curator_env, monkeypatch, tmp_path
+):
+    c = curator_env["curator"]
+    linked_skills = tmp_path / "linked-skills"
+    linked_skills.symlink_to(
+        curator_env["home"] / "skills",
+        target_is_directory=True,
+    )
+    monkeypatch.setenv(
+        "HERMES_CURATOR_STATE_PATH",
+        str(linked_skills / "state.json"),
+    )
+
+    with pytest.raises(ValueError, match="must not use symlinks"):
+        c._state_file()
+
+
+def test_state_file_rejects_symlinked_file(
+    curator_env, monkeypatch, tmp_path
+):
+    c = curator_env["curator"]
+    real_state = tmp_path / "real-state.json"
+    real_state.write_text("{}", encoding="utf-8")
+    linked_state = tmp_path / "linked-state.json"
+    linked_state.symlink_to(real_state)
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(linked_state))
+
+    with pytest.raises(ValueError, match="must not use symlinks"):
+        c._state_file()
+
+
+def test_state_override_does_not_migrate_default_state(
+    curator_env, monkeypatch, tmp_path
+):
+    c = curator_env["curator"]
+    default_path = c._state_file()
+    c.save_state({"paused": True, "run_count": 7})
+
+    override = tmp_path / "curator" / "state.json"
+    monkeypatch.setenv("HERMES_CURATOR_STATE_PATH", str(override))
+
+    assert c.load_state() == c._default_state()
+    assert default_path.exists()
+    assert not override.exists()
+
+
+def test_state_file_survives_corrupt_read(curator_env):
+    c = curator_env["curator"]
+    c._state_file().write_text("not json", encoding="utf-8")
+    # Must fall back to default, not raise
+    assert c.load_state() == c._default_state()
 
 
 def test_state_atomic_write_no_tmp_leftovers(curator_env):

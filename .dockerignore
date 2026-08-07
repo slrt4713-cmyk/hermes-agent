@@ -103,3 +103,6 @@ plans/
 .gitattributes
 .hadolint.yaml
 .mailmap
+
+# Client-specific Dockerfiles are explicit deployment variants, not shared image content.
+Dockerfile.*

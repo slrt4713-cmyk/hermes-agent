@@ -6,6 +6,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+MAIN_WRAPPER = REPO_ROOT / "docker" / "main-wrapper.sh"
+STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
 
 
 def _dockerfile_text() -> str:
@@ -37,6 +39,30 @@ def test_dockerfile_does_not_chown_install_trees_to_hermes() -> None:
             "runtime install trees under /opt/hermes must stay immutable; "
             f"found forbidden pattern {pattern!r}"
         )
+
+
+def test_hosted_runtime_refuses_bootstrap_mutation_of_existing_data() -> None:
+    text = STAGE2_HOOK.read_text()
+
+    assert (
+        'HERMES_HOSTED_IMMUTABLE_RUNTIME="${HERMES_HOSTED_IMMUTABLE_RUNTIME:-0}"'
+        in text
+    )
+    assert "hosted immutable runtime requires UID:GID 10000:10000" in text
+    assert 'as_hermes test -r "$HERMES_HOME/.env"' in text
+    assert 'as_hermes test -r "$HERMES_HOME/config.yaml"' in text
+    assert (
+        'if [ "$HERMES_HOSTED_IMMUTABLE_RUNTIME" != 1 ]; then\n'
+        'actual_hermes_uid=$(id -u hermes)'
+    ) in text
+
+
+def test_main_wrapper_drops_root_before_accessing_runtime_data() -> None:
+    text = MAIN_WRAPPER.read_text()
+    drop = 'if [ "$cur_uid" = 0 ]; then\n    exec s6-setuidgid hermes "$0" "$@"\nfi'
+
+    assert drop in text
+    assert text.index(drop) < text.index("cd /opt/data")
 
 
 def test_dockerfile_bakes_code_scoped_install_method_stamp() -> None:

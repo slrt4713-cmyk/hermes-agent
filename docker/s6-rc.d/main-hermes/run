@@ -22,6 +22,12 @@
 #
 # For now this service is a no-op: it sleeps forever, doing nothing.
 # The dashboard runs as a real s6 service alongside it (see
-# ../dashboard/run) and per-profile gateways register dynamically via
-# /run/service/ at runtime (Phase 4).
-exec sleep infinity
+# ../dashboard/run) and per-profile gateways register dynamically under
+# /run/hermes-profile-services/ at runtime (Phase 4).
+#
+# Drop this placeholder to the unprivileged hermes user.
+# 015-supervise-perms hands this slot's control FIFO to hermes for lifecycle
+# signalling; keeping the placeholder root would leave a root target for that
+# FIFO (defense in depth, mirrors ../dashboard/run).
+[ "$(id -u)" = 0 ] || exec sleep infinity
+exec s6-setuidgid hermes sleep infinity

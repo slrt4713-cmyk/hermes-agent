@@ -9306,11 +9306,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 # path only (run.py emits a path-pointing context note).
                 MAX_TEXT_INJECT_BYTES = 100 * 1024
                 _is_text = ext in _TEXT_INJECT_EXTENSIONS or (doc_mime or "").startswith("text/")
+                display_name = original_filename or f"document{ext or '.txt'}"
+                display_name = re.sub(r'[^\w.\- ]', '_', display_name)
                 if _is_text and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                     try:
                         text_content = raw_bytes.decode("utf-8")
-                        display_name = original_filename or f"document{ext or '.txt'}"
-                        display_name = re.sub(r'[^\w.\- ]', '_', display_name)
                         injection = f"[Content of {display_name}]:\n{text_content}"
                         if event.text:
                             event.text = f"{injection}\n\n{event.text}"
@@ -9320,6 +9320,39 @@ class TelegramAdapter(BasePlatformAdapter):
                         # Binary file — agent has the cached path and can use
                         # terminal/read_file against it. No inline injection.
                         pass
+                elif ext:
+                    from tools.read_extract import (
+                        ExtractionError,
+                        extract_document_text,
+                        is_extractable_document,
+                    )
+
+                    cached_path = cached.path
+                    if is_extractable_document(cached_path):
+                        try:
+                            text_content = await asyncio.to_thread(
+                                extract_document_text, cached_path
+                            )
+                        except ExtractionError:
+                            logger.warning(
+                                "[Telegram] Could not extract document text from %s",
+                                display_name,
+                                exc_info=True,
+                            )
+                        else:
+                            if len(text_content.encode("utf-8")) <= MAX_TEXT_INJECT_BYTES:
+                                injection = f"[Content of {display_name}]:\n{text_content}"
+                                if event.text:
+                                    event.text = f"{injection}\n\n{event.text}"
+                                else:
+                                    event.text = injection
+                            else:
+                                logger.info(
+                                    "[Telegram] Skipping extracted document injection for %s: "
+                                    "extracted text exceeds %d bytes",
+                                    display_name,
+                                    MAX_TEXT_INJECT_BYTES,
+                                )
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache document: %s", _redact_telegram_error_text(e), exc_info=True)

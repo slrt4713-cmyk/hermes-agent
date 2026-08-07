@@ -70,7 +70,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 # hermes process, the dashboard, and per-profile gateways.
 RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-    ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils && \
+    ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg poppler-utils gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 # Prefer the fixed SQLite over Debian's vulnerable libsqlite3.so.0. Keep the
@@ -335,10 +335,10 @@ RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
 
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.
-# Per-profile gateway services are registered dynamically at runtime by
-# the profile create/delete hooks (Phase 4); they live under
-# /run/service/ (tmpfs) and are reconciled on container restart by
-# /etc/cont-init.d/02-reconcile-profiles (Phase 4 Task 4.0).
+# Per-profile gateway services are registered dynamically under the
+# hermes-owned nested s6 scan directory at
+# /run/hermes-profile-services/. The root /run/service tree remains
+# immutable to the runtime user.
 COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 
 # stage2-hook handles UID/GID remap, volume chown, config seeding,
@@ -348,7 +348,8 @@ COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 #
 # 02-reconcile-profiles re-creates per-profile gateway s6 service
 # slots from $HERMES_HOME/profiles/<name>/ after a container restart
-# (the /run/service/ scandir is tmpfs and wiped on restart). Phase 4.
+# (the /run/hermes-profile-services/ scandir is tmpfs and wiped on restart).
+# Phase 4.
 RUN mkdir -p /etc/cont-init.d && \
     printf '#!/command/with-contenv sh\nexec /opt/hermes/docker/stage2-hook.sh\n' \
         > /etc/cont-init.d/01-hermes-setup && \

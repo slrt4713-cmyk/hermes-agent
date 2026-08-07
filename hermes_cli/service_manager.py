@@ -328,10 +328,10 @@ def get_service_manager() -> ServiceManager:
 # ---------------------------------------------------------------------------
 
 
-# s6-overlay's dynamic scandir for runtime-registered services. Lives on
-# tmpfs and is the directory s6-svscan watches. Writes here trigger
-# automatic supervision on the next rescan.
-S6_DYNAMIC_SCANDIR = Path("/run/service")
+# Runtime-registered services are watched by a nested s6-svscan process
+# running as hermes. The root s6-overlay scandir at /run/service stays
+# root-only because PID 1 executes services registered there as root.
+S6_DYNAMIC_SCANDIR = Path("/run/hermes-profile-services")
 S6_SERVICE_PREFIX = "gateway-"
 
 
@@ -403,145 +403,6 @@ def _write_gateway_desired_state(name: str, desired_state: str) -> None:
 # s6-overlay-symlinks-noarch tarball only links a subset, and we
 # want every s6 invocation to be guaranteed-findable.
 _S6_BIN_DIR = "/command"
-
-
-# UID/GID of the in-image ``hermes`` user. Hardcoded to match what
-# ``stage2-hook.sh`` enforces (the runtime invariant — see also
-# tests/docker/test_uid_remap.py). The container starts s6-supervise
-# under root and immediately drops to this UID via ``s6-setuidgid``.
-_HERMES_UID = 10000
-_HERMES_GID = 10000
-
-
-def _seed_supervise_skeleton(svc_dir: Path) -> None:
-    """Pre-create the ``supervise/`` and top-level ``event/`` skeleton
-    inside a service directory, owned by the hermes user.
-
-    Why this exists
-    ---------------
-    When s6-supervise spawns a service it tries to ``mkdir`` two
-    directories: ``<svc>/event`` and ``<svc>/supervise``, both with mode
-    ``0700``. It also ``mkfifo``s ``<svc>/supervise/control`` with mode
-    ``0600``. Because s6-supervise runs as PID 1's effective UID (root)
-    these dirs end up root-owned mode 0700, and an unprivileged client
-    (the ``hermes`` user — UID 10000 — running every Hermes runtime
-    operation via ``s6-setuidgid``) gets ``EACCES`` on any ``s6-svc``,
-    ``s6-svstat``, or ``s6-svwait`` invocation against the slot.
-
-    The PR #30136 review surfaced this as a real product gap: the
-    entire S6ServiceManager lifecycle (``register/start/stop/unregister
-    _profile_gateway``) was inert in production because every operation
-    is dispatched as the hermes user.
-
-    Why this works
-    --------------
-    Reading s6's source (src/supervision/s6-supervise.c::trymkdir +
-    control_init): the ``mkdir`` and ``mkfifo`` calls both treat
-    ``EEXIST`` as success. If the directory is already present, the
-    chown/chmod fix-up that would normally make event/ ``03730
-    root:root`` is **skipped** entirely — s6-supervise just opens the
-    pre-existing FIFOs and proceeds. So if we lay the skeleton down
-    with hermes ownership before triggering ``s6-svscanctl -a``,
-    s6-supervise inherits our layout and never touches it.
-
-    Layout produced
-    ---------------
-    ``svc_dir/``                           hermes:hermes, 0755 (parent must already exist)
-    ``svc_dir/event/``                     hermes:hermes, 03730   (setgid + g+rwx + sticky)
-    ``svc_dir/supervise/``                 hermes:hermes, 0755
-    ``svc_dir/supervise/event/``           hermes:hermes, 03730
-    ``svc_dir/supervise/control``          hermes:hermes, 0660    (FIFO)
-
-    The ``death_tally``, ``lock``, and ``status`` regular files end up
-    written by s6-supervise itself (as root), but those land mode 0644 —
-    world-readable — and ``s6-svstat`` only needs read access, so the
-    hermes user reads them fine.
-
-    If ``svc_dir/log/`` is present (the canonical s6 logger pattern —
-    one s6-supervise instance per service, plus a second for its
-    logger), the same skeleton is seeded under ``log/`` as well:
-    ``log/event/``, ``log/supervise/``, ``log/supervise/event/``,
-    ``log/supervise/control``. Without this, unregister teardown
-    would EACCES on the logger's supervise dir even after the parent
-    slot's supervise/ was hermes-owned.
-
-    Idempotency
-    -----------
-    Safe to call against a directory where the skeleton already exists.
-    Existing entries are left untouched (the helper doesn't try to
-    re-chown / re-chmod live FIFOs that s6-supervise may have already
-    opened).
-
-    Reference
-    ---------
-    Discussed at length on the skarnet `skaware` mailing list in 2020
-    (`<http://skarnet.org/lists/skaware/1424.html>`_); see also
-    just-containers/s6-overlay#130. The pre-creation pattern was
-    historically called out as forward-compatibility-fragile, but the
-    EEXIST handling in s6-supervise has been stable since 2015 — it's
-    the same pattern ``s6-svperms`` and ``fix-attrs.d`` rely on.
-    """
-    import os
-
-    def _mkdir_owned(path: Path, mode: int) -> None:
-        if path.exists():
-            return
-        path.mkdir(parents=False, exist_ok=False)
-        path.chmod(mode)
-        try:
-            os.chown(path, _HERMES_UID, _HERMES_GID)
-        except PermissionError:
-            # Running as the hermes user already — directory is hermes-
-            # owned by default. The chown is a no-op in that case, so
-            # swallowing this keeps both root and unprivileged callers
-            # on one code path.
-            pass
-
-    # Top-level event/ dir (this is the s6-svlisten1 event-subscription
-    # dir at the service root, distinct from supervise/event/).
-    _mkdir_owned(svc_dir / "event", 0o3730)
-
-    # supervise/ dir + its inner event/ dir.
-    supervise = svc_dir / "supervise"
-    _mkdir_owned(supervise, 0o755)
-    _mkdir_owned(supervise / "event", 0o3730)
-
-    # supervise/control FIFO. Same EEXIST-safe pattern: if it's already
-    # there (s6-supervise has already started against this slot), leave
-    # it alone. The explicit chmod after mkfifo is required because
-    # mkfifo honors the process umask, which can strip group-write
-    # (e.g. the default 0022 on most dev hosts → 0o660 becomes 0o640).
-    # The container runs with umask 0 inside s6-overlay's stage2, but
-    # being defensive here keeps the helper consistent under any
-    # invocation context.
-    control = supervise / "control"
-    if not control.exists():
-        os.mkfifo(control, 0o660)
-        control.chmod(0o660)
-        try:
-            os.chown(control, _HERMES_UID, _HERMES_GID)
-        except PermissionError:
-            pass
-
-    # If a log/ subdir is present (the canonical s6 logger pattern —
-    # see servicedir(7)), it gets its own s6-supervise instance and
-    # needs the same skeleton. Without this, unregister teardown
-    # would EACCES on the logger's root-owned supervise/ dir even
-    # when the parent slot's supervise/ is hermes-owned.
-    log_dir = svc_dir / "log"
-    if log_dir.is_dir():
-        _mkdir_owned(log_dir / "event", 0o3730)
-        log_supervise = log_dir / "supervise"
-        _mkdir_owned(log_supervise, 0o755)
-        _mkdir_owned(log_supervise / "event", 0o3730)
-        log_control = log_supervise / "control"
-        if not log_control.exists():
-            os.mkfifo(log_control, 0o660)
-            log_control.chmod(0o660)
-            try:
-                os.chown(log_control, _HERMES_UID, _HERMES_GID)
-            except PermissionError:
-                pass
 
 
 class S6Error(RuntimeError):
@@ -1007,15 +868,6 @@ class S6ServiceManager:
             log_run.write_text(self._render_log_run(profile), encoding="utf-8")
             log_run.chmod(0o755)
 
-            # Pre-create the supervise/ skeleton with hermes ownership
-            # BEFORE we publish the slot. s6-supervise will EEXIST our
-            # dirs/FIFOs and inherit the ownership, so the runtime
-            # s6-svc / s6-svstat / s6-svwait calls (all dispatched as
-            # the hermes user) won't hit EACCES on root-owned 0700
-            # dirs. See ``_seed_supervise_skeleton`` for the full
-            # rationale.
-            _seed_supervise_skeleton(tmp_dir)
-
             # When start_now is False, write a `down` marker so
             # s6-supervise does not auto-start the service on rescan.
             # Mirrors the same pattern in container_boot.py
@@ -1096,13 +948,8 @@ class S6ServiceManager:
         # user-perceived latency.
         time.sleep(0.2)
 
-        # Now the supervise dir's files are no longer held open by a
-        # live s6-supervise, so rmtree can remove them. Files inside
-        # supervise/ are root-owned (death_tally, lock, status, written
-        # by s6-supervise itself) — but the parent supervise/ directory
-        # is hermes-owned (see ``_seed_supervise_skeleton``), and on
-        # POSIX you only need write+execute on the parent to remove
-        # contained files regardless of file ownership.
+        # The nested s6-svscan and its supervise children run as hermes,
+        # so every runtime supervision file remains removable here.
         shutil.rmtree(svc_dir, ignore_errors=True)
 
     def list_profile_gateways(self) -> list[str]:

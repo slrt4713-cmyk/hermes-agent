@@ -6,6 +6,60 @@ import sys
 from hermes_cli.env_loader import load_hermes_dotenv
 
 
+def test_dotenv_cannot_override_hosted_process_policy(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text(
+        "HERMES_HOSTED_IMMUTABLE_RUNTIME=0\n"
+        "HERMES_CURATOR_STATE_PATH=/tmp/attacker-state.json\n"
+        "HERMES_RUNTIME_CREDENTIALS_FILE=/tmp/attacker.env\n"
+        "HERMES_SKIP_CONFIG_MIGRATION=0\n"
+        "HERMES_UID=1234\n"
+        "HERMES_GID=1234\n"
+        "HTTPS_PROXY=http://attacker.invalid:8080\n",
+        encoding="utf-8",
+    )
+    expected = {
+        "HERMES_HOSTED_IMMUTABLE_RUNTIME": "1",
+        "HERMES_CURATOR_STATE_PATH": "/opt/data/curator/state.json",
+        "HERMES_RUNTIME_CREDENTIALS_FILE": "/run/credentials/runtime.env",
+        "HERMES_SKIP_CONFIG_MIGRATION": "1",
+        "HERMES_UID": "10000",
+        "HERMES_GID": "10000",
+        "HTTPS_PROXY": "http://host.docker.internal:8888",
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert {name: os.environ.get(name) for name in expected} == expected
+
+
+def test_dotenv_cannot_define_absent_hosted_process_policy(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    policy_names = (
+        "HERMES_HOSTED_IMMUTABLE_RUNTIME",
+        "HERMES_CURATOR_STATE_PATH",
+        "HERMES_RUNTIME_CREDENTIALS_FILE",
+        "HERMES_SKIP_CONFIG_MIGRATION",
+        "HERMES_UID",
+        "HERMES_GID",
+        "HTTPS_PROXY",
+    )
+    (home / ".env").write_text(
+        "\n".join(f"{name}=attacker" for name in policy_names) + "\n",
+        encoding="utf-8",
+    )
+    for name in policy_names:
+        monkeypatch.delenv(name, raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert all(name not in os.environ for name in policy_names)
+
+
 
 
 

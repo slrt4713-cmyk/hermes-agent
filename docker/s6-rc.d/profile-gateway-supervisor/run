@@ -1,0 +1,11 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+set -eu
+
+scandir=/run/hermes-profile-services
+[ -d "$scandir" ]
+[ "$(stat -c %U:%G "$scandir")" = "hermes:hermes" ]
+[ "$(stat -c %a "$scandir")" = "700" ]
+
+[ "$(id -u)" = 0 ] || exec s6-svscan "$scandir"
+exec s6-setuidgid hermes s6-svscan "$scandir"

@@ -1,0 +1,54 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+manifest_version: 1
+
+name: zoom
+description: Read Zoom meetings, cloud recordings, and transcript text from Hermes.
+source: https://developers.zoom.us/docs/api/meetings/
+
+transport:
+  type: stdio
+  command: hermes-zoom-mcp
+
+auth:
+  type: api_key
+  env:
+    - name: ZOOM_ACCOUNT_ID
+      prompt: "Zoom Server-to-Server OAuth account ID"
+      required: true
+      secret: true
+    - name: ZOOM_CLIENT_ID
+      prompt: "Zoom Server-to-Server OAuth client ID"
+      required: true
+      secret: true
+    - name: ZOOM_CLIENT_SECRET
+      prompt: "Zoom Server-to-Server OAuth client secret"
+      required: true
+      secret: true
+    - name: ZOOM_USER_ID
+      prompt: "Zoom host user ID or email"
+      required: true
+      secret: false
+
+tools:
+  default_enabled:
+    - meetings_list
+    - meetings_get
+    - recordings_list
+    - recordings_get
+    - recordings_transcript
+
+post_install: |
+  Create a Zoom Server-to-Server OAuth app for the client's own account.
+  Grant only these granular admin scopes:
+    meeting:read:list_meetings:admin
+    meeting:read:meeting:admin
+    cloud_recording:read:list_user_recordings:admin
+    cloud_recording:read:list_recording_files:admin
+    cloud_recording:read:meeting_transcript:admin
+
+  The Zoom account must have cloud recording and audio transcription enabled.
+  This connector is read-only. It cannot create, update, or delete meetings,
+  recordings, or transcripts.
+
+  Start a new Hermes session after installation so the Zoom tools are loaded.
