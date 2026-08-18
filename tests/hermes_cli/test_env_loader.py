@@ -494,3 +494,87 @@ def test_other_profile_home_does_not_bridge_process_config(tmp_path, monkeypatch
 
     # The other profile's .env value stands; the process config was not applied.
     assert os.getenv("TERMINAL_ENV") == "docker"
+
+
+# ---------------------------------------------------------------------------
+# Hosted s6 container_environment overlay
+#
+# Hosted cron reloads ~/.hermes/.env with override=True. A blank
+# TELEGRAM_BOT_TOKEN= in the data .env used to wipe the live token that
+# s6 injected at process start, so standalone cron delivery constructed
+# Bot(token="") and raised Botfather. The overlay copies
+# /run/s6/container_environment after dotenv so the hosted value wins.
+# ---------------------------------------------------------------------------
+
+
+def test_hosted_s6_env_overrides_empty_dotenv_token(tmp_path, monkeypatch):
+    from hermes_cli import env_loader
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text("TELEGRAM_BOT_TOKEN=\n", encoding="utf-8")
+    s6_dir = tmp_path / "s6"
+    s6_dir.mkdir()
+    (s6_dir / "TELEGRAM_BOT_TOKEN").write_text("123456:hosted-token", encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_HOSTED_IMMUTABLE_RUNTIME", "1")
+    monkeypatch.setattr(env_loader, "_HOSTED_CONTAINER_ENV_DIR", s6_dir)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.environ["TELEGRAM_BOT_TOKEN"] == "123456:hosted-token"
+
+
+def test_hosted_s6_env_skipped_when_not_hosted(tmp_path, monkeypatch):
+    from hermes_cli import env_loader
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    s6_dir = tmp_path / "s6"
+    s6_dir.mkdir()
+    (s6_dir / "TELEGRAM_BOT_TOKEN").write_text("123456:hosted-token", encoding="utf-8")
+
+    monkeypatch.delenv("HERMES_HOSTED_IMMUTABLE_RUNTIME", raising=False)
+    monkeypatch.setattr(env_loader, "_HOSTED_CONTAINER_ENV_DIR", s6_dir)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert "TELEGRAM_BOT_TOKEN" not in os.environ
+
+
+def test_hosted_s6_env_does_not_override_process_policy(tmp_path, monkeypatch):
+    from hermes_cli import env_loader
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    s6_dir = tmp_path / "s6"
+    s6_dir.mkdir()
+    (s6_dir / "HERMES_UID").write_text("1", encoding="utf-8")
+    (s6_dir / "TELEGRAM_BOT_TOKEN").write_text("123456:hosted-token", encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_HOSTED_IMMUTABLE_RUNTIME", "1")
+    monkeypatch.setenv("HERMES_UID", "10000")
+    monkeypatch.setattr(env_loader, "_HOSTED_CONTAINER_ENV_DIR", s6_dir)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.environ["HERMES_UID"] == "10000"
+    assert os.environ["TELEGRAM_BOT_TOKEN"] == "123456:hosted-token"
+
+
+def test_read_hosted_container_env_rejects_symlink(tmp_path, monkeypatch):
+    from hermes_cli import env_loader
+
+    s6_dir = tmp_path / "s6"
+    s6_dir.mkdir()
+    target = tmp_path / "secret"
+    target.write_text("123456:hosted-token", encoding="utf-8")
+    (s6_dir / "TELEGRAM_BOT_TOKEN").symlink_to(target)
+
+    monkeypatch.setenv("HERMES_HOSTED_IMMUTABLE_RUNTIME", "1")
+    monkeypatch.setattr(env_loader, "_HOSTED_CONTAINER_ENV_DIR", s6_dir)
+
+    assert env_loader.read_hosted_container_env("TELEGRAM_BOT_TOKEN") is None

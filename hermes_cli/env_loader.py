@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 import io
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -77,6 +78,12 @@ _PROCESS_POLICY_ENV_VARS = (
 )
 _MISSING_ENV_VALUE = object()
 
+# s6 with-contenv injects /run/s6/container_environment/<NAME> into supervised
+# services. Cron reloads and docker exec do not. The host credentials file is
+# root-only; the runtime user reads the s6 copies (0440, runtime group).
+_HOSTED_CONTAINER_ENV_DIR = Path("/run/s6/container_environment")
+_HOSTED_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
 
 def _capture_process_policy_env() -> dict[str, str | object]:
     return {
@@ -91,6 +98,53 @@ def _restore_process_policy_env(snapshot: dict[str, str | object]) -> None:
             os.environ.pop(name, None)
         else:
             os.environ[name] = str(value)
+
+
+def read_hosted_container_env(name: str) -> str | None:
+    """Read one hosted s6 env value if this is an immutable runtime.
+
+    Returns None when the process is not hosted, the name is invalid, or
+    the s6 file is missing, unreadable, a symlink, or unsafe.
+    """
+    if os.environ.get("HERMES_HOSTED_IMMUTABLE_RUNTIME") != "1":
+        return None
+    if _HOSTED_ENV_NAME_RE.fullmatch(name) is None:
+        return None
+    path = _HOSTED_CONTAINER_ENV_DIR / name
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        value = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not value or any(character in value for character in ("\x00", "\r", "\n")):
+        return None
+    return value
+
+
+def apply_hosted_container_env() -> None:
+    """Copy hosted s6 service env into os.environ.
+
+    Hosted values win over a stale or empty profile .env so a blank
+    TELEGRAM_BOT_TOKEN= cannot wipe the live token before cron delivery.
+    Process-policy names are skipped; load_hermes_dotenv restores those.
+    """
+    if os.environ.get("HERMES_HOSTED_IMMUTABLE_RUNTIME") != "1":
+        return
+    source = _HOSTED_CONTAINER_ENV_DIR
+    try:
+        if source.is_symlink() or not source.is_dir():
+            return
+        entries = list(source.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name in _PROCESS_POLICY_ENV_VARS:
+            continue
+        value = read_hosted_container_env(entry.name)
+        if value is None:
+            continue
+        os.environ[entry.name] = value
 
 
 def _known_hermes_env_keys() -> set[str]:
@@ -548,6 +602,7 @@ def load_hermes_dotenv(
         _apply_external_secret_sources(home_path)
         _restore_process_policy_env(process_policy_env)
         _apply_managed_env()
+        apply_hosted_container_env()
     finally:
         _restore_process_policy_env(process_policy_env)
 

@@ -1173,6 +1173,28 @@ def _is_telegram_thread_not_found(error: Exception) -> bool:
     return "thread not found" in str(error).lower()
 
 
+def _resolve_telegram_token(token) -> str:
+    """Resolve a Telegram bot token for the standalone send path.
+
+    Hosted cron and docker exec often see an empty config token: the
+    live value is injected by s6 with-contenv into supervised processes
+    only. Fall back to the process env, then the hosted s6 copy.
+    """
+    resolved = str(token or "").strip()
+    if resolved:
+        return resolved
+    resolved = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if resolved:
+        return resolved
+    try:
+        from hermes_cli.env_loader import read_hosted_container_env
+
+        hosted = read_hosted_container_env("TELEGRAM_BOT_TOKEN")
+    except Exception:
+        hosted = None
+    return str(hosted or "").strip()
+
+
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
     """Send via Telegram Bot API (one-shot, no polling needed).
 
@@ -1181,6 +1203,9 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
     already contains HTML tags, it is sent with ``parse_mode='HTML'``
     instead, bypassing MarkdownV2 conversion.
     """
+    token = _resolve_telegram_token(token)
+    if not token:
+        return {"error": "Telegram bot token is missing"}
     try:
         from telegram import Bot
         from telegram.constants import ParseMode
