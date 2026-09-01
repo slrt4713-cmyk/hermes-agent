@@ -456,6 +456,57 @@ async def test_reconnect_schedules_heartbeat_probe_on_success():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_transient_failure_does_not_restart_polling():
+    """One flaky proxy request must not interrupt the active getUpdates loop."""
+    adapter = _make_adapter()
+    mock_app = MagicMock()
+    mock_app.bot.get_me = AsyncMock(
+        side_effect=[OSError("transient proxy timeout"), MagicMock()]
+    )
+    adapter._app = mock_app
+    adapter._probe_pending_updates = AsyncMock()
+    adapter._schedule_polling_recovery = MagicMock()
+
+    sleep_calls = 0
+
+    async def fast_sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 3:
+            raise asyncio.CancelledError()
+
+    with patch("asyncio.sleep", side_effect=fast_sleep):
+        await adapter._polling_heartbeat_loop()
+
+    adapter._schedule_polling_recovery.assert_not_called()
+    assert adapter._polling_heartbeat_failure_count == 0
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_consecutive_failures_restart_polling():
+    """Two consecutive failed probes still recover a genuinely dead path."""
+    adapter = _make_adapter()
+    mock_app = MagicMock()
+    mock_app.bot.get_me = AsyncMock(side_effect=OSError("proxy unavailable"))
+    adapter._app = mock_app
+    adapter._schedule_polling_recovery = MagicMock()
+
+    sleep_calls = 0
+
+    async def fast_sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 3:
+            raise asyncio.CancelledError()
+
+    with patch("asyncio.sleep", side_effect=fast_sleep):
+        await adapter._polling_heartbeat_loop()
+
+    adapter._schedule_polling_recovery.assert_called_once()
+    assert adapter._polling_heartbeat_failure_count == 0
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_loop_skips_reconnect_if_already_in_progress():
     """If a reconnect task is already running, the heartbeat must not spawn another."""
     adapter = _make_adapter()

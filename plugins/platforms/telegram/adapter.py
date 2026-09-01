@@ -838,6 +838,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # error_callback ever fires and the gateway silently stops receiving
         # messages with the process still alive (#55769).
         self._polling_not_running_count: int = 0
+        # A single general-path heartbeat timeout can be a brief proxy or IPv6
+        # routing wobble while getUpdates remains healthy. Require consecutive
+        # failures before interrupting the active polling generation.
+        self._polling_heartbeat_failure_count: int = 0
         # A polling generation stays degraded until the dedicated getUpdates
         # request makes successful progress. start_polling() return and getMe()
         # success on the general request path are not polling-health signals.
@@ -3057,6 +3061,23 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         HEARTBEAT_INTERVAL = 90   # seconds between probes
         PROBE_TIMEOUT = 15        # seconds before declaring the path dead
+        HEARTBEAT_FAILURE_THRESHOLD = 2
+
+        def record_probe_failure(probe_err: Exception) -> None:
+            self._polling_heartbeat_failure_count += 1
+            failures = self._polling_heartbeat_failure_count
+            if failures < HEARTBEAT_FAILURE_THRESHOLD:
+                logger.warning(
+                    "[%s] Telegram heartbeat probe failed (%d/%d); keeping "
+                    "the active polling generation. Error: %s",
+                    self.name,
+                    failures,
+                    HEARTBEAT_FAILURE_THRESHOLD,
+                    _redact_telegram_error_text(probe_err),
+                )
+                return
+            self._polling_heartbeat_failure_count = 0
+            self._schedule_polling_recovery(probe_err, reason="heartbeat probe")
 
         # Wedged-recovery watchdog state (#66377). Tracked locally so no
         # _polling_error_task assignment site needs to stamp a timestamp: the
@@ -3120,6 +3141,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if not callable(getattr(bot, "get_me", None)):
                     return
                 await asyncio.wait_for(bot.get_me(), PROBE_TIMEOUT)
+                self._polling_heartbeat_failure_count = 0
                 # get_me() refreshes PTB's cached bot user in place, so this is
                 # also where a BotFather rename gets picked up: adopt whatever
                 # handle Telegram just reported before anything routes on it.
@@ -3138,14 +3160,14 @@ class TelegramAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 return
             except (asyncio.TimeoutError, OSError) as probe_err:
-                self._schedule_polling_recovery(probe_err, reason="heartbeat probe")
+                record_probe_failure(probe_err)
             except Exception as probe_err:
                 if self._looks_like_network_error(probe_err):
-                    self._schedule_polling_recovery(probe_err, reason="heartbeat probe")
+                    record_probe_failure(probe_err)
                     continue
                 # Non-connectivity errors (e.g. TelegramError 401) are not
                 # CLOSE-WAIT symptoms — let PTB's own handlers surface them.
-                pass
+                self._polling_heartbeat_failure_count = 0
 
     async def _probe_pending_updates(self, bot, probe_timeout: float) -> None:
         """Detect a wedged getUpdates consumer via pending_update_count.
