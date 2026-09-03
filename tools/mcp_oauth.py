@@ -32,6 +32,8 @@ Configuration in config.yaml::
           redirect_uri: "https://proxy/callback"  # default: loopback callback
           redirect_host: "localhost"            # loopback hostname (WAF-safe)
           client_name: "My Custom Client"       # default: "Hermes Agent"
+          authorization_params:                 # extra authorize-URL query params
+            token_access_type: "offline"        # Dropbox refresh tokens
 """
 
 import asyncio
@@ -51,7 +53,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from hermes_constants import secure_parent_dir
 
 logger = logging.getLogger(__name__)
@@ -738,7 +740,49 @@ def _make_callback_handler() -> tuple[type, dict]:
 # ---------------------------------------------------------------------------
 
 
-def _make_redirect_handler(port: int, redirect_uri: str | None = None):
+_AUTH_PARAM_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+def _authorization_query_params(cfg: dict[str, Any]) -> dict[str, str]:
+    """Return extra authorize-URL query params from oauth config.
+
+    Dropbox requires ``token_access_type=offline`` to issue a refresh token.
+    Unknown keys stay out of the URL.
+    """
+    raw = cfg.get("authorization_params")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("oauth.authorization_params must be a non-empty mapping")
+    params: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or _AUTH_PARAM_KEY.fullmatch(key) is None:
+            raise ValueError("oauth.authorization_params key is invalid")
+        if (
+            not isinstance(value, str)
+            or not 1 <= len(value) <= 128
+            or any(ord(character) < 32 for character in value)
+        ):
+            raise ValueError("oauth.authorization_params value is invalid")
+        params[key] = value
+    return params
+
+
+def _apply_authorization_params(authorization_url: str, extra: dict[str, str]) -> str:
+    """Merge extra query params into a provider authorize URL."""
+    if not extra:
+        return authorization_url
+    parts = urlparse(authorization_url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update(extra)
+    return urlunparse(parts._replace(query=urlencode(query)))
+
+
+def _make_redirect_handler(
+    port: int,
+    redirect_uri: str | None = None,
+    extra_params: dict[str, str] | None = None,
+):
     """Return a redirect handler closure that closes over the given port.
 
     Using a closure instead of reading the module-level ``_oauth_port`` avoids
@@ -750,12 +794,15 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
     hint: a proxied callback reaches this machine on its own, so the loopback
     SSH-tunnel guidance would be misleading.
     """
+    extra = dict(extra_params or {})
+
     async def _redirect_handler(authorization_url: str) -> None:
         """Show the authorization URL to the user.
 
         Opens the browser automatically when possible; always prints the URL
         as a fallback for headless/SSH/gateway environments.
         """
+        authorization_url = _apply_authorization_params(authorization_url, extra)
         from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
 
         dashboard_flow = get_dashboard_oauth_flow()
@@ -1577,7 +1624,9 @@ def build_oauth_auth(
     # Use closure factories to avoid global state pollution (#44588, #34260).
     resolved_port = cfg.get("_resolved_port", _oauth_port)
     redirect_handler = _make_redirect_handler(
-        resolved_port, redirect_uri=cfg.get("redirect_uri") or None
+        resolved_port,
+        redirect_uri=cfg.get("redirect_uri") or None,
+        extra_params=_authorization_query_params(cfg),
     )
     callback_handler = _make_callback_waiter(
         resolved_port, timeout=float(cfg.get("timeout", 300))

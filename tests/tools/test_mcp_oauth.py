@@ -15,6 +15,8 @@ from tools.mcp_oauth import (
     OAuthNonInteractiveError,
     build_oauth_auth,
     remove_oauth_tokens,
+    _apply_authorization_params,
+    _authorization_query_params,
     _find_free_port,
     _can_open_browser,
     _is_interactive,
@@ -1106,3 +1108,44 @@ def test_humanize_non_registration_403_passthrough():
         )
         is None
     )
+
+
+def test_authorization_query_params_accepts_dropbox_offline():
+    assert _authorization_query_params({}) == {}
+    assert _authorization_query_params(
+        {"authorization_params": {"token_access_type": "offline"}}
+    ) == {"token_access_type": "offline"}
+    with pytest.raises(ValueError):
+        _authorization_query_params({"authorization_params": "offline"})
+    with pytest.raises(ValueError):
+        _authorization_query_params({"authorization_params": {"": "offline"}})
+    with pytest.raises(ValueError):
+        _authorization_query_params({"authorization_params": {"token_access_type": "off\nline"}})
+
+
+def test_apply_authorization_params_merges_query():
+    url = "https://www.dropbox.com/oauth2/authorize?client_id=abc&state=s1"
+    updated = _apply_authorization_params(
+        url, {"token_access_type": "offline"}
+    )
+    assert "token_access_type=offline" in updated
+    assert "client_id=abc" in updated
+    assert "state=s1" in updated
+    assert _apply_authorization_params(url, {}) == url
+
+
+def test_redirect_handler_prints_offline_param(monkeypatch, capsys):
+    import tools.mcp_oauth as mco
+
+    monkeypatch.setattr(mco, "_is_interactive", lambda: True)
+    monkeypatch.setattr(mco, "_can_open_browser", lambda: False)
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    handler = _make_redirect_handler(
+        8765, extra_params={"token_access_type": "offline"}
+    )
+    asyncio.run(
+        handler("https://www.dropbox.com/oauth2/authorize?client_id=abc&state=s1")
+    )
+    err = capsys.readouterr().err
+    assert "token_access_type=offline" in err

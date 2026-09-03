@@ -620,6 +620,7 @@ class MCPOAuthManager:
             _is_interactive,
             _maybe_preregister_client,
             _make_callback_waiter,
+            _authorization_query_params,
             _make_redirect_handler,
         )
 
@@ -654,7 +655,11 @@ class MCPOAuthManager:
         _maybe_preregister_client(storage, cfg, client_metadata)
 
         resolved_port = cfg.get("_resolved_port", 0)
-        redirect_handler = _make_redirect_handler(resolved_port)
+        redirect_handler = _make_redirect_handler(
+            resolved_port,
+            redirect_uri=cfg.get("redirect_uri") or None,
+            extra_params=_authorization_query_params(cfg),
+        )
         # mcp 2.0 removed OAuthClientProvider's `timeout` argument, so the
         # configured `oauth.timeout` now bounds the callback waiter's own poll
         # loop instead — that is where the browser round-trip is awaited.
