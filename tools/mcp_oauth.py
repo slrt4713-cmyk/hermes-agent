@@ -59,7 +59,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 from hermes_constants import secure_parent_dir
 
 logger = logging.getLogger(__name__)
@@ -797,7 +797,56 @@ def _make_callback_handler() -> tuple[type, dict]:
 # ---------------------------------------------------------------------------
 
 
-def _make_redirect_handler(port: int, redirect_uri: str | None = None):
+_RESERVED_AUTHORIZATION_PARAMS = frozenset({
+    "client_id", "code_challenge", "code_challenge_method", "redirect_uri",
+    "resource", "response_type", "scope", "state",
+})
+
+
+def _normalize_authorization_params(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("oauth.authorization_params must be a mapping")
+
+    normalized: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key or not isinstance(item, str) or not item:
+            raise ValueError(
+                "oauth.authorization_params keys and values must be non-empty strings"
+            )
+        if key in _RESERVED_AUTHORIZATION_PARAMS:
+            raise ValueError(
+                f"oauth.authorization_params cannot override reserved parameter {key!r}"
+            )
+        normalized[key] = item
+    return normalized
+
+
+def _add_authorization_params(
+    authorization_url: str, authorization_params: dict[str, str]
+) -> str:
+    if not authorization_params:
+        return authorization_url
+
+    parsed = urlparse(authorization_url)
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    existing = {key for key, _value in query}
+    duplicate = existing.intersection(authorization_params)
+    if duplicate:
+        names = ", ".join(sorted(duplicate))
+        raise ValueError(
+            f"authorization URL already contains configured parameter(s): {names}"
+        )
+    query.extend(authorization_params.items())
+    return parsed._replace(query=urlencode(query)).geturl()
+
+
+def _make_redirect_handler(
+    port: int,
+    redirect_uri: str | None = None,
+    authorization_params: dict[str, str] | None = None,
+):
     """Return a redirect handler closure that closes over the given port.
 
     Using a closure instead of reading the module-level ``_oauth_port`` avoids
@@ -809,6 +858,8 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
     hint: a proxied callback reaches this machine on its own, so the loopback
     SSH-tunnel guidance would be misleading.
     """
+    extra_params = _normalize_authorization_params(authorization_params)
+
     async def _redirect_handler(authorization_url: str) -> None:
         """Show the authorization URL to the user.
 
@@ -816,6 +867,8 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
         as a fallback for headless/SSH/gateway environments.
         """
         from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
+
+        authorization_url = _add_authorization_params(authorization_url, extra_params)
 
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
@@ -1929,7 +1982,9 @@ def build_oauth_auth(
     # Use closure factories to avoid global state pollution (#44588, #34260).
     resolved_port = cfg.get("_resolved_port", _oauth_port)
     redirect_handler = _make_redirect_handler(
-        resolved_port, redirect_uri=cfg.get("redirect_uri") or None
+        resolved_port,
+        redirect_uri=cfg.get("redirect_uri") or None,
+        authorization_params=cfg.get("authorization_params"),
     )
     callback_handler = _make_callback_waiter(
         resolved_port, cfg.get("_cimd_url"), timeout=float(cfg.get("timeout", 300))

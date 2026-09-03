@@ -857,6 +857,37 @@ class TestNonInteractiveFailFastAtCallbackBoundary:
         err = capsys.readouterr().err
         assert "https://idp.example.com/authorize?x=9" in err
 
+    def test_redirect_handler_adds_provider_authorization_params(
+        self, monkeypatch, capsys
+    ):
+        """Provider-specific OAuth parameters reach the authorization URL."""
+        import asyncio
+        from urllib.parse import parse_qs, urlparse
+
+        import tools.mcp_oauth as mod
+
+        monkeypatch.setattr(mod, "_is_interactive", lambda: True)
+        monkeypatch.setattr(mod, "_can_open_browser", lambda: False)
+        monkeypatch.delenv("SSH_CLIENT", raising=False)
+        monkeypatch.delenv("SSH_TTY", raising=False)
+
+        asyncio.run(
+            mod._make_redirect_handler(
+                49303,
+                authorization_params={"token_access_type": "offline"},
+            )("https://www.dropbox.com/oauth2/authorize?state=opaque")
+        )
+
+        printed_url = next(
+            line.strip()
+            for line in capsys.readouterr().err.splitlines()
+            if line.strip().startswith("https://www.dropbox.com/oauth2/authorize")
+        )
+        assert parse_qs(urlparse(printed_url).query) == {
+            "state": ["opaque"],
+            "token_access_type": ["offline"],
+        }
+
 
 # ---------------------------------------------------------------------------
 # Extracted helper tests (Task 3 of MCP OAuth consolidation)
