@@ -496,6 +496,14 @@ class HermesTokenStorage:
 
     async def set_tokens(self, tokens: "OAuthToken") -> None:
         payload = tokens.model_dump(mode="json", exclude_none=True)
+        # RFC 6749 section 5.1: refresh_token is optional on refresh
+        # responses. Dropbox omits it. exclude_none would then overwrite a
+        # working cache and kill offline access at the next 4-hour expiry.
+        if not payload.get("refresh_token"):
+            existing = _read_json(self._tokens_path()) or {}
+            previous = existing.get("refresh_token")
+            if isinstance(previous, str) and previous:
+                payload["refresh_token"] = previous
         # Persist an absolute ``expires_at`` so a process restart can
         # reconstruct the correct remaining TTL. Without this the MCP SDK's
         # ``_initialize`` reloads a relative ``expires_in`` which has no

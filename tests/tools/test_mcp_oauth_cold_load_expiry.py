@@ -105,6 +105,78 @@ class TestSetTokensAbsoluteExpiry:
         )
         assert "expires_at" not in on_disk
 
+    def test_set_tokens_keeps_existing_refresh_token_when_omitted(
+        self, tmp_path, monkeypatch
+    ):
+        """A refresh response that omits refresh_token must not erase the cache."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from mcp.shared.auth import OAuthToken
+
+        from tools.mcp_oauth import HermesTokenStorage
+
+        storage = HermesTokenStorage("srv")
+        asyncio.run(
+            storage.set_tokens(
+                OAuthToken(
+                    access_token="old-access",
+                    token_type="Bearer",
+                    expires_in=14400,
+                    refresh_token="keep-me",
+                )
+            )
+        )
+        asyncio.run(
+            storage.set_tokens(
+                OAuthToken(
+                    access_token="new-access",
+                    token_type="Bearer",
+                    expires_in=14400,
+                    refresh_token=None,
+                )
+            )
+        )
+
+        on_disk = json.loads(
+            (tmp_path / "mcp-tokens" / "srv.json").read_text()
+        )
+        assert on_disk["access_token"] == "new-access"
+        assert on_disk["refresh_token"] == "keep-me"
+
+    def test_set_tokens_replaces_refresh_token_on_rotation(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from mcp.shared.auth import OAuthToken
+
+        from tools.mcp_oauth import HermesTokenStorage
+
+        storage = HermesTokenStorage("srv")
+        asyncio.run(
+            storage.set_tokens(
+                OAuthToken(
+                    access_token="old-access",
+                    token_type="Bearer",
+                    expires_in=14400,
+                    refresh_token="old-refresh",
+                )
+            )
+        )
+        asyncio.run(
+            storage.set_tokens(
+                OAuthToken(
+                    access_token="new-access",
+                    token_type="Bearer",
+                    expires_in=14400,
+                    refresh_token="rotated-refresh",
+                )
+            )
+        )
+
+        on_disk = json.loads(
+            (tmp_path / "mcp-tokens" / "srv.json").read_text()
+        )
+        assert on_disk["refresh_token"] == "rotated-refresh"
+
 
 class TestGetTokensReconstructsExpiresIn:
     def test_get_tokens_uses_expires_at_for_remaining_ttl(
