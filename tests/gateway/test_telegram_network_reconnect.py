@@ -118,9 +118,9 @@ async def test_reconnect_does_not_self_schedule_when_fatal_error_set():
 
 
 @pytest.mark.asyncio
-async def test_reconnect_success_resets_error_count():
+async def test_reconnect_start_keeps_error_count_until_heartbeat():
     """
-    When start_polling() succeeds, _polling_network_error_count should reset to 0.
+    start_polling() alone does not prove recovery, so the retry count remains.
     """
     adapter = _make_adapter()
     adapter._polling_network_error_count = 3
@@ -138,7 +138,7 @@ async def test_reconnect_success_resets_error_count():
     with patch("asyncio.sleep", new_callable=AsyncMock):
         await adapter._handle_polling_network_error(Exception("Bad Gateway"))
 
-    assert adapter._polling_network_error_count == 0
+    assert adapter._polling_network_error_count == 4
 
     # Clean up the heartbeat-probe task scheduled after a successful reconnect.
     pending = [t for t in adapter._background_tasks if not t.done()]
@@ -224,7 +224,7 @@ async def test_reconnect_drains_polling_request_only():
 
     # Reconnect must still succeed
     mock_app.updater.start_polling.assert_called_once()
-    assert adapter._polling_network_error_count == 0
+    assert adapter._polling_network_error_count == 2
 
 
 @pytest.mark.asyncio
@@ -244,7 +244,7 @@ async def test_reconnect_continues_if_drain_fails():
 
     # start_polling must still be called despite drain failure
     mock_app.updater.start_polling.assert_called_once()
-    assert adapter._polling_network_error_count == 0
+    assert adapter._polling_network_error_count == 2
 
 
 @pytest.mark.asyncio
@@ -314,6 +314,7 @@ async def test_heartbeat_probe_no_op_when_polling_healthy():
     mock_app.updater = mock_updater
     mock_app.bot.get_me = AsyncMock(return_value=MagicMock())
     adapter._app = mock_app
+    adapter._polling_network_error_count = 4
 
     adapter._handle_polling_network_error = AsyncMock()
 
@@ -322,6 +323,7 @@ async def test_heartbeat_probe_no_op_when_polling_healthy():
 
     mock_app.bot.get_me.assert_awaited_once()
     adapter._handle_polling_network_error.assert_not_awaited()
+    assert adapter._polling_network_error_count == 0
 
 
 @pytest.mark.asyncio
@@ -410,6 +412,30 @@ async def test_heartbeat_probe_reenters_ladder_on_get_me_network_error():
     assert isinstance(
         adapter._handle_polling_network_error.await_args.args[0], ConnectionError
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_heartbeat_reaches_fatal_retry_threshold():
+    """A wedged reconnect must accumulate instead of looping at attempt one."""
+    adapter = _make_adapter()
+    adapter._polling_network_error_count = 10
+
+    mock_updater = MagicMock()
+    mock_updater.running = True
+    mock_app = MagicMock()
+    mock_app.updater = mock_updater
+    mock_app.bot.get_me = AsyncMock(side_effect=ConnectionError("pool wedged"))
+    adapter._app = mock_app
+
+    fatal_handler = AsyncMock()
+    adapter.set_fatal_error_handler(fatal_handler)
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await adapter._verify_polling_after_reconnect()
+
+    assert adapter.has_fatal_error
+    assert adapter.fatal_error_code == "telegram_network_error"
+    fatal_handler.assert_awaited_once()
 
 
 @pytest.mark.asyncio

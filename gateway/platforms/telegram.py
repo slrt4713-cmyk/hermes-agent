@@ -1552,7 +1552,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[%s] Telegram polling resumed after network error (attempt %d)",
                 self.name, attempt,
             )
-            self._polling_network_error_count = 0
             # start_polling() returning is necessary but not sufficient:
             # PTB's Updater can be left in a state where `running` is True
             # but the underlying long-poll task is wedged on a stale httpx
@@ -1612,6 +1611,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         try:
             await asyncio.wait_for(self._app.bot.get_me(), PROBE_TIMEOUT)
+            self._polling_network_error_count = 0
             self._send_path_degraded = False
         except Exception as probe_err:
             logger.warning(
