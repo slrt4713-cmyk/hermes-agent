@@ -2299,7 +2299,10 @@ class ElicitationHandler:
 
         if answer == "accept":
             self.metrics["accepted"] += 1
-            return ElicitResult(action="accept", content={})
+            content = {}
+            if schema.get("x-hermes-confirmation") == "target-bound-once":
+                content["hermes_confirmation"] = "target-bound-once"
+            return ElicitResult(action="accept", content=content)
         if answer == "cancel":
             self.metrics["errors"] += 1
             return ElicitResult(action="cancel")

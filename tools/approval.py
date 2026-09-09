@@ -2653,15 +2653,20 @@ def resolve_gateway_approval(session_key: str, choice: str,
         if not queue:
             return 0
         if request_id:
-            targets = [entry for entry in queue if entry.data.get("request_id") == request_id]
-            if not targets:
-                return 0
-            queue[:] = [entry for entry in queue if entry not in targets]
+            candidates = [entry for entry in queue if entry.data.get("request_id") == request_id]
         elif resolve_all:
-            targets = list(queue)
-            queue.clear()
+            candidates = list(queue)
         else:
-            targets = [queue.pop(0)]
+            candidates = queue[:1]
+        targets = [
+            entry for entry in candidates
+            if (choice == "deny" or request_id or not entry.data.get("require_request_id"))
+            and (choice != "session" or entry.data.get("allow_session") is not False)
+            and (choice != "always" or entry.data.get("allow_permanent") is not False)
+        ]
+        if not targets:
+            return 0
+        queue[:] = [entry for entry in queue if entry not in targets]
         if not queue:
             _gateway_queues.pop(session_key, None)
 
@@ -4175,7 +4180,7 @@ def _await_coalesced_leader(session_key: str, leader, approval_data: dict,
 
 
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
-                            *, surface: str = "gateway") -> dict:
+                            *, surface: str = "gateway", timeout_seconds: int | None = None) -> dict:
     """Enqueue *approval_data*, notify the user, and block the calling agent
     thread until the request is resolved or the gateway approval timeout
     elapses — firing pre/post approval hooks and cleaning up the queue entry.
@@ -4276,7 +4281,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     # every ~10s to the agent's inactivity tracker — otherwise the gateway
     # watchdog kills the agent while the user is still responding. Mirrors
     # _wait_for_process() cadence.
-    timeout = _get_approval_timeout()
+    timeout = _get_approval_timeout() if timeout_seconds is None else max(0, timeout_seconds)
 
     try:
         from tools.environments.base import touch_activity_if_due
@@ -5344,11 +5349,14 @@ def request_elicitation_consent(
             "command": message,
             "description": description,
             "pattern_key": "mcp_elicitation",
+            "require_request_id": True,
+            "allow_session": False,
+            "allow_permanent": False,
             "pattern_keys": ["mcp_elicitation"],
         }
         try:
             decision = _await_gateway_decision(
-                session_key, notify_cb, approval_data, surface=surface,
+                session_key, notify_cb, approval_data, surface=surface, timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
             logger.error(
@@ -5361,7 +5369,7 @@ def request_elicitation_consent(
         if not decision.get("resolved"):
             return "cancel"
         choice = decision.get("choice")
-        if choice in ("once", "session", "always"):
+        if choice == "once":
             return "accept"
         return "decline"
 
@@ -5380,7 +5388,7 @@ def request_elicitation_consent(
         )
         return "decline"
 
-    if choice in ("once", "session", "always"):
+    if choice == "once":
         return "accept"
     if choice == "timeout":
         # Prompt expired without a user response — mirror the gateway's
