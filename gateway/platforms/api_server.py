@@ -71,8 +71,8 @@ _api_request_profile: ContextVar[Optional[str]] = ContextVar(
     "api_server_request_profile", default=None
 )
 
-def _approval_event_choices(*, smart_denied: bool, allow_permanent: bool) -> list[str]:
-    if smart_denied:
+def _approval_event_choices(*, smart_denied: bool, allow_permanent: bool, allow_session: bool = True) -> list[str]:
+    if smart_denied or not allow_session:
         return ["once", "deny"]
     return ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
 
@@ -6854,12 +6854,14 @@ class APIServerAdapter(BasePlatformAdapter):
                         "choices": _approval_event_choices(
                             smart_denied=bool(event.get("smart_denied")),
                             allow_permanent=event.get("allow_permanent") is not False,
+                            allow_session=event.get("allow_session") is not False,
                         ),
                     })
                     self._set_run_status(
                         run_id,
                         "waiting_for_approval",
                         last_event="approval.request",
+                        approval=event,
                     )
                     try:
                         loop.call_soon_threadsafe(q.put_nowait, event)
@@ -7172,6 +7174,12 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception:
             return web.json_response(_openai_error("Invalid JSON"), status=400)
 
+        if not isinstance(body, dict):
+            return web.json_response(_openai_error("Invalid JSON object"), status=400)
+        raw_request_id = body.get("request_id")
+        request_id = raw_request_id.strip() if isinstance(raw_request_id, str) else ""
+        if raw_request_id is not None and (not request_id or len(request_id) > 256):
+            return web.json_response(_openai_error("Invalid approval request ID"), status=400)
         raw_choice = str(body.get("choice", "")).strip().lower()
         aliases = {"approve": "once", "approved": "once", "allow": "once"}
         choice = aliases.get(raw_choice, raw_choice)
@@ -7200,12 +7208,13 @@ class APIServerAdapter(BasePlatformAdapter):
             or _coerce_request_bool(body.get("resolve_all"), default=False)
         )
         try:
-            from tools.approval import resolve_gateway_approval
+            from tools.approval import resolve_gateway_approval, list_gateway_approvals
 
             resolved = resolve_gateway_approval(
                 approval_session_key,
                 choice,
                 resolve_all=resolve_all,
+                request_id=request_id or None,
             )
         except Exception as exc:
             logger.exception("[api_server] approval resolution failed for run %s", run_id)
@@ -7220,7 +7229,23 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=409,
             )
 
-        self._set_run_status(run_id, "running", last_event="approval.responded")
+        remaining = list_gateway_approvals(approval_session_key)
+        next_approval = None
+        if remaining:
+            from gateway.run import _redact_approval_command
+            next_approval = dict(remaining[0])
+            next_approval["command"] = _redact_approval_command(next_approval.get("command"))
+            next_approval.update(event="approval.request", run_id=run_id,
+                choices=_approval_event_choices(smart_denied=bool(next_approval.get("smart_denied")),
+                    allow_permanent=next_approval.get("allow_permanent") is not False,
+                    allow_session=next_approval.get("allow_session") is not False))
+            self._set_run_status(run_id, "waiting_for_approval", approval=next_approval)
+        else:
+            current = self._run_statuses.get(run_id, {})
+            current_approval = current.get("approval") or {}
+            resolved_id = request_id or (status.get("approval") or {}).get("request_id")
+            if current.get("status") == "waiting_for_approval" and (not current_approval or current_approval.get("request_id") == resolved_id):
+                self._set_run_status(run_id, "running", last_event="approval.responded", approval=None)
         q = self._run_streams.get(run_id)
         if q is not None:
             try:
@@ -7230,7 +7255,10 @@ class APIServerAdapter(BasePlatformAdapter):
                     "timestamp": time.time(),
                     "choice": choice,
                     "resolved": resolved,
+                    "request_id": request_id or None,
                 })
+                if next_approval is not None:
+                    q.put_nowait(next_approval)
             except Exception:
                 pass
 

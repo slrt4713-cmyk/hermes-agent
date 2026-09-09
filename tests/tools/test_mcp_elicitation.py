@@ -69,6 +69,15 @@ class TestSchemaSummary:
 
 
 class TestElicitationHandlerFormMode:
+    def test_target_bound_confirmation_returns_protocol_receipt(self):
+        handler = ElicitationHandler("m365", {"timeout": 5})
+        params = _form_params("Delete the exact event?", {
+            "type": "object", "properties": {}, "x-hermes-confirmation": "target-bound-once",
+        })
+        with patch("tools.approval.request_elicitation_consent", return_value="accept"):
+            result = asyncio.run(handler(context=None, params=params))
+        assert result.content == {"hermes_confirmation": "target-bound-once"}
+
     def test_user_accepts_once_returns_accept(self):
         handler = ElicitationHandler("pay", {"timeout": 5})
         params = _form_params(
@@ -98,12 +107,13 @@ class TestElicitationHandlerFormMode:
         """
         from mcp.types import ElicitRequestFormParams
 
+        schema_field = "requested_schema" if "requested_schema" in ElicitRequestFormParams.model_fields else "requestedSchema"
         params = ElicitRequestFormParams(
             message="authorize a payment of $0.50",
-            requested_schema={
+            **{schema_field: {
                 "type": "object",
                 "properties": {"card_number": {"type": "string"}},
-            },
+            }},
         )
         handler = ElicitationHandler("pay", {"timeout": 5})
         captured: dict = {}

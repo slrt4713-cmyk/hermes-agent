@@ -75,6 +75,27 @@ def _create_runs_app(adapter: APIServerAdapter) -> web.Application:
     return app
 
 
+@pytest.mark.asyncio
+async def test_approval_endpoint_forwards_the_exact_request_identity():
+    adapter = _make_adapter()
+    run_id = "target-bound-run"
+    session = "target-bound-api-session"
+    entry = approval_mod._ApprovalEntry({"command": "Delete selected event", "require_request_id": True})
+    approval_mod._gateway_queues[session] = [entry]
+    adapter._run_statuses[run_id] = {"status": "waiting_for_approval"}
+    adapter._run_approval_sessions[run_id] = session
+    try:
+        async with TestClient(TestServer(_create_runs_app(adapter))) as client:
+            stale = await client.post(f"/v1/runs/{run_id}/approval", json={"choice": "once", "request_id": "stale"})
+            assert stale.status == 409
+            assert not entry.event.is_set()
+            accepted = await client.post(f"/v1/runs/{run_id}/approval", json={"choice": "once", "request_id": entry.data["request_id"]})
+            assert accepted.status == 200
+            assert entry.event.is_set()
+    finally:
+        approval_mod._gateway_queues.pop(session, None)
+
+
 def _make_slow_agent(**kwargs):
     """Create a mock agent that blocks in run_conversation until interrupted.
 
