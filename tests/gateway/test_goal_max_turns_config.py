@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -30,6 +32,9 @@ async def test_gateway_goal_uses_goals_max_turns_from_full_config(tmp_path, monk
     (home / "config.yaml").write_text("goals:\n  max_turns: 7\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
     goals._DB_CACHE.clear()
+    # Test config propagation with a ready database, independent of the
+    # bounded cold-start grace window covered by the bootstrap tests.
+    assert await asyncio.to_thread(goals._get_session_db) is not None
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
