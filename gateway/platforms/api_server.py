@@ -7,6 +7,7 @@ Exposes an HTTP server with endpoints:
 - GET  /v1/responses/{response_id} — Retrieve a stored response
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent as an available model
+- GET  /v1/run-options             : model and reasoning choices for agent runs
 - GET  /v1/capabilities            — machine-readable API capabilities for external UIs
 - GET  /api/sessions               — list client-visible Hermes sessions
 - POST /api/sessions               — create an empty Hermes session
@@ -1069,6 +1070,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        model_override: Optional[str] = None,
+        reasoning_effort_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1097,7 +1100,26 @@ class APIServerAdapter(BasePlatformAdapter):
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
-        model = _resolve_gateway_model()
+        configured_model = _resolve_gateway_model()
+        model = model_override or configured_model
+        if model_override and model_override != configured_model:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            codex_runtime = resolve_runtime_provider(
+                requested="openai-codex", target_model=model_override
+            )
+            for key in (
+                "api_key", "base_url", "provider", "api_mode", "command",
+                "args", "credential_pool",
+            ):
+                runtime_kwargs[key] = codex_runtime.get(key)
+            runtime_kwargs["args"] = list(codex_runtime.get("args") or [])
+        if reasoning_effort_override:
+            if runtime_kwargs.get("provider") != "openai-codex":
+                raise ValueError("Reasoning control requires the OpenAI Codex provider")
+            from hermes_constants import parse_reasoning_effort
+
+            reasoning_config = parse_reasoning_effort(reasoning_effort_override)
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
@@ -1107,6 +1129,8 @@ class APIServerAdapter(BasePlatformAdapter):
         # Load fallback provider chain so the API server platform has the
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
+        if model_override and model_override != configured_model:
+            fallback_model = None
 
         agent = AIAgent(
             model=model,
@@ -1128,6 +1152,62 @@ class APIServerAdapter(BasePlatformAdapter):
             gateway_session_key=gateway_session_key,
         )
         return agent
+
+    def _run_control_options(self) -> dict:
+        """Expose the default model and live Codex choices for this account."""
+        from gateway.run import _load_gateway_config, _resolve_gateway_model
+
+        config = _load_gateway_config()
+        model_config = config.get("model") or {}
+        provider = model_config.get("provider") if isinstance(model_config, dict) else None
+        current_model = _resolve_gateway_model(config)
+        agent_config = config.get("agent") or {}
+        current_effort = str(agent_config.get("reasoning_effort") or "medium")
+        from hermes_cli.codex_models import get_codex_model_options
+
+        access_token = None
+        try:
+            from hermes_cli.auth import resolve_codex_runtime_credentials
+
+            access_token = resolve_codex_runtime_credentials(
+                refresh_if_expiring=True
+            ).get("api_key")
+        except Exception:
+            pass
+        entries = get_codex_model_options(access_token) if access_token else []
+        models = []
+        efforts_by_model = {}
+        for entry in entries:
+            model = entry["id"]
+            if (
+                isinstance(model, str)
+                and re.fullmatch(r"[A-Za-z0-9._-]{1,100}", model)
+                and entry["reasoning_efforts"]
+            ):
+                models.append(model)
+                efforts_by_model[model] = entry["reasoning_efforts"]
+        if current_model and current_model not in models:
+            models.insert(0, current_model)
+            efforts_by_model[current_model] = (
+                [current_effort]
+                if provider == "openai-codex"
+                and current_effort in {"low", "medium", "high", "xhigh"}
+                else []
+            )
+        return {
+            "current_model": current_model,
+            "models": models[:50],
+            "current_reasoning_effort": current_effort,
+            "reasoning_efforts": efforts_by_model.get(current_model, []),
+            "reasoning_efforts_by_model": efforts_by_model,
+        }
+
+    async def _handle_run_options(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        options = await asyncio.to_thread(self._run_control_options)
+        return web.json_response(options)
 
     # ------------------------------------------------------------------
     # HTTP Handlers
@@ -1262,6 +1342,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "models": {"method": "GET", "path": "/v1/models"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
+                "run_options": {"method": "GET", "path": "/v1/run-options"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
                 "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
                 "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"},
@@ -3868,6 +3949,31 @@ class APIServerAdapter(BasePlatformAdapter):
         if not user_message:
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
+        model_override = body.get("agent_model")
+        reasoning_effort_override = body.get("reasoning_effort")
+        if model_override is not None or reasoning_effort_override is not None:
+            options = await asyncio.to_thread(self._run_control_options)
+            if model_override is not None and (
+                not isinstance(model_override, str)
+                or model_override not in options["models"]
+                or (
+                    model_override != options["current_model"]
+                    and not options["reasoning_efforts_by_model"].get(model_override)
+                )
+            ):
+                return web.json_response(_openai_error("Unavailable agent model"), status=400)
+            selected_model = model_override or options["current_model"]
+            available_efforts = options["reasoning_efforts_by_model"].get(selected_model, [])
+            if reasoning_effort_override is not None and (
+                not isinstance(reasoning_effort_override, str)
+                or reasoning_effort_override not in available_efforts
+            ):
+                return web.json_response(_openai_error("Unavailable reasoning effort"), status=400)
+            if model_override is not None and model_override != options["current_model"] and reasoning_effort_override is None and (
+                options["current_reasoning_effort"] not in available_efforts
+            ):
+                return web.json_response(_openai_error("Select a reasoning effort"), status=400)
+
         instructions = body.get("instructions")
         previous_response_id = body.get("previous_response_id")
 
@@ -3947,7 +4053,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "queued",
             created_at=created_at,
             session_id=session_id,
-            model=body.get("model", self._model_name),
+            model=model_override or body.get("model", self._model_name),
         )
 
         async def _run_and_close():
@@ -3959,6 +4065,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=event_cb,
                     gateway_session_key=gateway_session_key,
+                    model_override=model_override,
+                    reasoning_effort_override=reasoning_effort_override,
                 )
                 self._active_run_agents[run_id] = agent
 
@@ -4418,6 +4526,7 @@ class APIServerAdapter(BasePlatformAdapter):
             if _CRON_AVAILABLE:
                 self._app.router.add_post("/api/cron/fire", self._handle_cron_fire)
             # Structured event streaming
+            self._app.router.add_get("/v1/run-options", self._handle_run_options)
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
             self._app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
