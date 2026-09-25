@@ -101,6 +101,31 @@ def auth_adapter():
 
 
 class TestStartRun:
+    def test_run_options_include_codex_with_a_deepseek_default(self, adapter):
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "gateway.run._load_gateway_config",
+                return_value={
+                    "model": {"provider": "deepseek", "default": "deepseek-v4-flash"},
+                    "agent": {"reasoning_effort": "medium"},
+                },
+            ))
+            stack.enter_context(patch(
+                "hermes_cli.auth.resolve_codex_runtime_credentials",
+                return_value={"api_key": "valid-codex-token"},
+            ))
+            stack.enter_context(patch(
+                "hermes_cli.codex_models.get_codex_model_options",
+                return_value=[{"id": "gpt-6-astra", "reasoning_efforts": ["low", "high"]}],
+            ))
+            options = adapter._run_control_options()
+
+        assert options["models"] == ["deepseek-v4-flash", "gpt-6-astra"]
+        assert options["reasoning_efforts_by_model"] == {
+            "deepseek-v4-flash": [],
+            "gpt-6-astra": ["low", "high"],
+        }
+
     def test_agent_creation_applies_run_controls(self, adapter):
         with ExitStack() as stack:
             for target, value in (
