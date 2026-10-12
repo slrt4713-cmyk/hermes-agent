@@ -207,6 +207,52 @@ def _sse_frame(data: Any, *, event: str = None, ensure_ascii: bool = True) -> by
     return f"{prefix}data: {json.dumps(data, ensure_ascii=ensure_ascii)}\n\n".encode()
 
 
+# Events that a bounded run history keeps even when it is full: losing them
+# would leave a resumed client waiting for an approval or a run end forever.
+_RUN_EVENT_KEEP_PREFIXES = ("run.", "approval.")
+
+
+class _RunEventLog:
+    """Replayable event history of one ``/v1/runs`` run.
+
+    Replaces a single-consumer queue: a client that disconnects (closed tab,
+    phone asleep) subscribes again, replays what the run already produced,
+    then follows it live. Several subscribers may follow the same run.
+    ``put_nowait`` keeps the queue interface used by the event producers and
+    must run on the event loop thread; ``None`` marks the end of the run.
+    """
+
+    MAX_EVENTS = 50000
+
+    def __init__(self, max_events: Optional[int] = None) -> None:
+        self.events: List[Dict[str, Any]] = []
+        self.closed = False
+        self.closed_at: Optional[float] = None
+        self.dropped_events = 0
+        self._max_events = max_events or self.MAX_EVENTS
+        self._changed = asyncio.Event()
+
+    def put_nowait(self, event: Optional[Dict[str, Any]]) -> None:
+        if self.closed:
+            return
+        if event is None:
+            self.closed = True
+            self.closed_at = time.time()
+        elif len(self.events) >= self._max_events and not str(
+            event.get("event", "")
+        ).startswith(_RUN_EVENT_KEEP_PREFIXES):
+            self.dropped_events += 1
+            return
+        else:
+            self.events.append(event)
+        changed, self._changed = self._changed, asyncio.Event()
+        changed.set()
+
+    def changed(self) -> "asyncio.Event":
+        """Event set on the next append or close; capture it before reading."""
+        return self._changed
+
+
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
     """Parse a listen port without letting malformed env/config values crash startup."""
     try:
@@ -1419,12 +1465,12 @@ class APIServerAdapter(BasePlatformAdapter):
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
         self._response_store = ResponseStore()
-        # Active run streams: run_id -> asyncio.Queue of SSE event dicts
-        self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
+        # Run event histories: run_id -> _RunEventLog, replayable on reconnect
+        self._run_streams: Dict[str, Any] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
-        # Runs with a connected SSE consumer; their queue is actively draining.
-        self._run_stream_subscribers: set[str] = set()
+        # Connected SSE subscribers per run; a run with subscribers is never swept.
+        self._run_stream_subscribers: Dict[str, int] = {}
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
@@ -6560,6 +6606,8 @@ class APIServerAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
+    _RUN_EVENTS_RETENTION = 600  # seconds a finished run stays replayable
+    _RUN_EVENTS_MAX_AGE = 86400  # hard bound for a history that never closes
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
 
     def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, Any]:
@@ -6767,7 +6815,7 @@ class APIServerAdapter(BasePlatformAdapter):
         approval_session_key = run_id
         ephemeral_system_prompt = instructions
         loop = asyncio.get_running_loop()
-        q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
+        q = _RunEventLog()
         created_at = time.time()
         self._run_streams[run_id] = q
         self._run_streams_created[run_id] = created_at
@@ -7119,8 +7167,17 @@ class APIServerAdapter(BasePlatformAdapter):
         else:
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
-        q = self._run_streams[run_id]
-        self._run_stream_subscribers.add(run_id)
+        log = self._run_streams[run_id]
+        # Resume after the last event the client saw (SSE Last-Event-ID or
+        # ?after=N); by default replay the whole run so a reopened page can
+        # rebuild the reply, then follow it live.
+        cursor_raw = request.headers.get("Last-Event-ID") or request.query.get("after") or "0"
+        try:
+            cursor = max(0, int(cursor_raw))
+        except ValueError:
+            cursor = 0
+        replay_until = len(log.events)
+        self._run_stream_subscribers[run_id] = self._run_stream_subscribers.get(run_id, 0) + 1
 
         response = web.StreamResponse(
             status=200,
@@ -7134,23 +7191,30 @@ class APIServerAdapter(BasePlatformAdapter):
 
         try:
             while True:
-                try:
-                    event = await asyncio.wait_for(q.get(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    await response.write(b": keepalive\n\n")
-                    continue
-                if event is None:
+                changed = log.changed()
+                while cursor < len(log.events):
+                    event = log.events[cursor]
+                    cursor += 1
+                    if cursor <= replay_until:
+                        event = {**event, "replay": True}
+                    await response.write(f"id: {cursor}\n".encode() + _sse_frame(event))
+                if log.closed:
                     # Run finished — send final SSE comment and close
                     await response.write(b": stream closed\n\n")
                     break
-                payload = _sse_frame(event)
-                await response.write(payload)
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    await response.write(b": keepalive\n\n")
         except Exception as exc:
             logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
         finally:
-            self._run_stream_subscribers.discard(run_id)
-            self._run_streams.pop(run_id, None)
-            self._run_streams_created.pop(run_id, None)
+            # The history outlives this subscriber: the sweeper expires it.
+            remaining = self._run_stream_subscribers.get(run_id, 0) - 1
+            if remaining > 0:
+                self._run_stream_subscribers[run_id] = remaining
+            else:
+                self._run_stream_subscribers.pop(run_id, None)
 
         return response
 
@@ -7367,6 +7431,15 @@ class APIServerAdapter(BasePlatformAdapter):
             await asyncio.sleep(60)
             self._sweep_orphaned_runs_once(time.time())
 
+    def _run_history_expired(self, run_id: str, created_at: float, now: float) -> bool:
+        """A run stays replayable while it runs and for a while after it ends."""
+        log = self._run_streams.get(run_id)
+        if not isinstance(log, _RunEventLog):
+            return now - created_at > self._RUN_STREAM_TTL
+        if log.closed:
+            return now - (log.closed_at or created_at) > self._RUN_EVENTS_RETENTION
+        return now - created_at > self._RUN_EVENTS_MAX_AGE
+
     def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
         """Expire old SSE buffers without treating transport age as run age."""
         if now is None:
@@ -7374,8 +7447,8 @@ class APIServerAdapter(BasePlatformAdapter):
         stale = [
             run_id
             for run_id, created_at in list(self._run_streams_created.items())
-            if now - created_at > self._RUN_STREAM_TTL
-            and run_id not in self._run_stream_subscribers
+            if run_id not in self._run_stream_subscribers
+            and self._run_history_expired(run_id, created_at, now)
         ]
         for run_id in stale:
             logger.debug("[api_server] sweeping expired run transport %s", run_id)
