@@ -2290,6 +2290,45 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
+# A recurring job that fails because the provider is overloaded, rate limited
+# or briefly down gets ONE retry this many minutes later, then returns to its
+# normal schedule. Without it a daily brief is lost for the whole day.
+TRANSIENT_RETRY_DELAY_MINUTES = 15
+_TRANSIENT_PROVIDER_ERROR = re.compile(
+    r"overloaded|try again later|rate limit|temporarily unavailable"
+    r"|error code: (429|500|502|503|504|529)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_transient_provider_error(error: Optional[str]) -> bool:
+    return bool(error) and bool(_TRANSIENT_PROVIDER_ERROR.search(error))
+
+
+def _schedule_transient_retry(job: Dict[str, Any], success: bool, error: Optional[str]) -> None:
+    """Pull ``next_run_at`` in for one retry after a transient provider failure.
+
+    The marker lives for a single run: the retry itself (success or failure)
+    clears it, so a provider that stays down never produces a retry loop.
+    """
+    retry_already_spent = job.pop("transient_retry_pending", False)
+    if success or retry_already_spent or not _is_transient_provider_error(error):
+        return
+    if job.get("schedule", {}).get("kind") not in {"cron", "interval"}:
+        return
+    scheduled = job.get("next_run_at")
+    if not scheduled:
+        return
+    retry_at = _hermes_now() + timedelta(minutes=TRANSIENT_RETRY_DELAY_MINUTES)
+    try:
+        if retry_at >= _ensure_aware(datetime.fromisoformat(scheduled)):
+            return
+    except (TypeError, ValueError):
+        return
+    job["next_run_at"] = retry_at.isoformat()
+    job["transient_retry_pending"] = True
+
+
 def mark_job_run(
     job_id: str,
     success: bool,
@@ -2508,6 +2547,7 @@ def _mark_job_run_locked(
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
+                _schedule_transient_retry(job, success, error)
 
                 # If no next run, decide whether this is terminal completion
                 # (one-shot) or a transient failure (recurring schedule couldn't
