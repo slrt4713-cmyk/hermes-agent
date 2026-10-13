@@ -1210,7 +1210,14 @@ async def _handle_run_approval(self, request: web.Request, *, _api_server) -> we
         return _json_error(
             _openai_error, f"Run has no pending approval: {run_id}", code="approval_not_pending", status=409)
     request_id_field = {"request_id": request_id} if request_id else {}
+    from tools.approval import list_gateway_approvals
+    still_pending = list_gateway_approvals(approval_session_key)
     _mark_run_event(self, run_id, "approval.responded", choice=choice, **request_id_field, resolved=resolved)
+    if still_pending:
+        # Another approval of this run is still waiting: a polling client must keep seeing it
+        # (its approval.request event was already streamed when it was raised).
+        self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request",
+                             approval=_api_server._approval_request_event(run_id, still_pending[0]))
     return web.json_response({
         "object": "hermes.run.approval_response", "run_id": run_id, "choice": choice, **request_id_field,
         "resolved": resolved})
