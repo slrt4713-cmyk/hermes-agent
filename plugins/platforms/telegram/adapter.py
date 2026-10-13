@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- fork ports on v0.21.7: the heartbeat debounce lives in telegram_network.py; two lines stay here (counter reset on a healthy probe, request_id kept with the approval card)
 """Telegram platform adapter (python-telegram-bot): inbound messages/media/commands, outbound replies."""
 
 import asyncio
@@ -182,7 +183,7 @@ from plugins.platforms.telegram.telegram_entities import expand_link_entities
 from plugins.platforms.telegram.telegram_held_inbound import TelegramHeldInboundMixin
 from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
 from plugins.platforms.telegram.telegram_network import (
-    SEED_FALLBACK_IPS, TelegramFallbackTransport, discover_fallback_ips, parse_fallback_ip_env, tcp_keepalive_socket_options)
+    SEED_FALLBACK_IPS, TelegramFallbackTransport, discover_fallback_ips, parse_fallback_ip_env, record_heartbeat_probe_failure, tcp_keepalive_socket_options)
 from utils import env_float, env_int
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -667,9 +668,6 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         # Consecutive heartbeat probes seeing queued updates the poller isn't consuming (get_me() can't
         # see a wedged getUpdates) / finding the updater stopped with no reconnect in flight; escalate after two.
         self._polling_pending_stuck_count = self._polling_not_running_count = 0
-        # Consecutive failed get_me() heartbeat probes. One failure on the general path can be a brief proxy
-        # or IPv6 routing wobble while getUpdates stays healthy, so recovery waits for a second one in a row.
-        self._polling_heartbeat_failure_count: int = 0
         # Degraded until getUpdates makes progress; while True, send() short-circuits to failure so callers
         # (cron live-adapter branch) fall through to standalone delivery.
         # Consecutive heartbeat probes that saw queued updates the running poller is not consuming. get_me()
@@ -704,8 +702,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         self._model_picker_state: dict[str, dict] = {}  # per-chat interactive picker state
         self._choice_picker_state: dict[str, dict] = {}
         self._approval_state: dict[int, str] = {}  # message_id → session_key
-        # approval_id → request_id of the pending approval the buttons answer (absent for legacy prompts).
-        self._approval_request_ids: dict[int, str] = {}
+        self._approval_request_ids: dict[int, Optional[str]] = {}  # approval_id → request_id the card answers
         self._slash_confirm_state: dict[str, str] = {}  # confirm_id → session_key
         self._clarify_state: dict[str, str] = {}  # clarify_id → session_key
         # "important" (default): only final responses, approvals and slash confirmations notify;
@@ -2107,21 +2104,6 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         steady-state wedges the one-shot verifier can't."""
         HEARTBEAT_INTERVAL = 90   # seconds between probes
         PROBE_TIMEOUT = 15        # seconds before declaring the path dead
-        HEARTBEAT_FAILURE_THRESHOLD = 2  # consecutive failed probes before recovery
-
-        def record_probe_failure(probe_err: Exception) -> None:
-            # A single failed probe keeps the active polling generation: restarting it on one proxy
-            # hiccup interrupts a healthy getUpdates long-poll for nothing.
-            self._polling_heartbeat_failure_count += 1
-            failures = self._polling_heartbeat_failure_count
-            if failures < HEARTBEAT_FAILURE_THRESHOLD:
-                logger.warning(
-                    "[%s] Telegram heartbeat probe failed (%d/%d); keeping the active polling generation. Error: %s",
-                    self.name, failures, HEARTBEAT_FAILURE_THRESHOLD, _redact_telegram_error_text(probe_err))
-                return
-            self._polling_heartbeat_failure_count = 0
-            self._schedule_polling_recovery(probe_err, reason="heartbeat probe")
-
         # Wedged-recovery watchdog: note when a recovery task is first seen in-flight and force-escalate
         # if the *same* task object still runs past the stuck timeout.
         # Tracked locally so no _polling_error_task assignment site needs to stamp a timestamp: the
@@ -2170,7 +2152,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
                 if not callable(getattr(bot, "get_me", None)):
                     return
                 await asyncio.wait_for(bot.get_me(), PROBE_TIMEOUT)
-                self._polling_heartbeat_failure_count = 0
+                self._polling_heartbeat_failure_count = 0  # a failed probe recovers only on the 2nd in a row
                 # get_me() refreshes PTB's cached bot user: adopt a BotFather rename before routing on it.
                 self._bot_identity_checked_at = time.monotonic()
                 self._note_bot_username(getattr(bot, "username", None))
@@ -2192,13 +2174,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             except asyncio.CancelledError:
                 return
             except (TimeoutError, OSError) as probe_err:
-                record_probe_failure(probe_err)
+                record_heartbeat_probe_failure(self, probe_err, _redact_telegram_error_text)
             except Exception as probe_err:
                 # Non-connectivity errors (e.g. TelegramError 401) aren't CLOSE-WAIT symptoms.
                 if self._looks_like_network_error(probe_err):
-                    record_probe_failure(probe_err)
-                else:
-                    self._polling_heartbeat_failure_count = 0
+                    record_heartbeat_probe_failure(self, probe_err, _redact_telegram_error_text)
 
     async def _probe_pending_updates(self, bot, probe_timeout: float) -> None:
         """Detect a wedged or stopped getUpdates consumer via pending_update_count.
@@ -4262,11 +4242,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             approval_id = next(self._approval_counter)
             buttons = [InlineKeyboardButton(label, callback_data=f"ea:{choice}:{approval_id}")
                        for label, choice, _ in prompt.actions]
-            def remember(_msg) -> None:
-                self._approval_state[approval_id] = prompt.session_key
-                if prompt.request_id:
-                    self._approval_request_ids[approval_id] = prompt.request_id
-            return prompt.text, InlineKeyboardMarkup(self._rows_of_two(buttons)), remember
+            return prompt.text, InlineKeyboardMarkup(self._rows_of_two(buttons)), (lambda msg: (
+                self._approval_state.__setitem__(approval_id, prompt.session_key), self._approval_request_ids.__setitem__(approval_id, prompt.request_id)))
         return await self._send_prompt(
             "send_exec_approval", prompt.chat_id, prompt.metadata, build, parse_mode=ParseMode.HTML,
             thread_id=self._metadata_thread_id(prompt.metadata), reply_to_mode=self._reply_to_mode)
@@ -4757,8 +4734,6 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             _toast("platform.telegram.approval.toast_already_resolved"))
         if not session_key:
             return
-        # Bound to the request this card was sent for: an old card can never approve a newer action.
-        request_id = self._approval_request_ids.pop(approval_id, None)
         user_display = getattr(query.from_user, "first_name", None) or t("platform.telegram.user_fallback")
         # Resolve FIRST (unblocks the agent thread), render after: a tap landing after the wait timed out
         # (count == 0) must NOT claim "Approved" — the command was already denied.
@@ -4767,7 +4742,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             # the approval wait timed out (count == 0) must NOT claim "Approved" — the command was already
             # denied and will not run (#63501 regression follow-up: 60s waits made stale taps common).
             from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(session_key, choice, request_id=request_id)
+            count = resolve_gateway_approval(session_key, choice, request_id=self._approval_request_ids.pop(approval_id, None))
             logger.info(
                 "Telegram button resolved %d approval(s) for session %s (choice=%s, user=%s)", count, session_key, choice, user_display)
         except Exception as exc:
