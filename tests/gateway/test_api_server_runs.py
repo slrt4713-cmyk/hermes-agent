@@ -1112,8 +1112,9 @@ class TestSteerRun:
 class TestRunLifecycleSweep:
 
     @pytest.mark.asyncio
-    async def test_expired_live_run_drops_transport_but_keeps_control_state(self, adapter):
-        """Stream TTL bounds buffering without detaching a live run."""
+    async def test_live_run_past_stream_ttl_keeps_transport_and_control_state(self, adapter):
+        """A live run outlasting the stream TTL stays resumable: a client that lost its SSE
+        connection must be able to resubscribe, and the backlog is bounded anyway."""
         app = _create_runs_app(adapter)
         adapter._max_concurrent_runs = 1
 
@@ -1150,8 +1151,8 @@ class TestRunLifecycleSweep:
 
                 assert adapter._active_run_tasks[run_id] is task
                 assert adapter._active_run_agents[run_id] is mock_agent
-                assert run_id not in adapter._run_streams
-                assert run_id not in adapter._run_streams_created
+                assert run_id in adapter._run_streams
+                assert run_id in adapter._run_streams_created
                 assert adapter._run_approval_sessions[run_id] == run_id
 
                 limited = adapter._concurrency_limited_response()
@@ -1169,6 +1170,71 @@ class TestRunLifecycleSweep:
                 stop_resp = await cli.post(f"/v1/runs/{run_id}/stop")
                 assert stop_resp.status == 200
                 mock_agent.interrupt.assert_called_once_with("Stop requested via API")
+
+
+    def test_finished_run_stays_replayable_for_the_retention_window(self, adapter):
+        run_id = "run_finished"
+        stream = adapter._run_streams[run_id] = _RunStream()
+        adapter._run_streams_created[run_id] = 1000.0
+        stream.put_nowait({"event": "run.completed"})
+        stream.put_nowait(None)
+        stream.closed_at = 2000.0
+
+        adapter._sweep_orphaned_runs_once(2000.0 + adapter._RUN_EVENTS_RETENTION)
+        assert run_id in adapter._run_streams
+
+        adapter._sweep_orphaned_runs_once(2000.0 + adapter._RUN_EVENTS_RETENTION + 1)
+        assert run_id not in adapter._run_streams
+        assert run_id not in adapter._run_streams_created
+
+    def test_orphaned_transport_without_a_live_run_still_expires_after_the_ttl(self, adapter):
+        run_id = "run_orphaned"
+        adapter._run_streams[run_id] = _RunStream()
+        adapter._run_streams_created[run_id] = 1000.0
+
+        adapter._sweep_orphaned_runs_once(1000.0 + adapter._RUN_STREAM_TTL + 1)
+
+        assert run_id not in adapter._run_streams
+
+
+class TestRunEventResume:
+    @staticmethod
+    def _frames(body: str) -> list[dict]:
+        return [json.loads(line.removeprefix("data: ")) for line in body.splitlines() if line.startswith("data: ")]
+
+    @pytest.mark.asyncio
+    async def test_after_resumes_past_the_given_id_and_marks_replayed_events(self, adapter):
+        run_id = "run_resume"
+        _claim_run(adapter, run_id)
+        stream = adapter._run_streams[run_id] = _RunStream()
+        for delta in ("a", "b", "c"):
+            stream.put_nowait({"event": "message.delta", "delta": delta})
+        stream.put_nowait({"event": "run.completed"})
+        stream.put_nowait(None)
+
+        async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+            full = self._frames(await (await cli.get(f"/v1/runs/{run_id}/events")).text())
+            resumed = self._frames(await (await cli.get(f"/v1/runs/{run_id}/events?after=1")).text())
+
+        assert [f["seq"] for f in full] == [0, 1, 2, 3]
+        assert all(f["replay"] is True for f in full)
+        assert [(f["seq"], f.get("delta")) for f in resumed] == [(2, "c"), (3, None)]
+
+    @pytest.mark.asyncio
+    async def test_live_events_are_not_marked_as_replay(self, adapter):
+        run_id = "run_live"
+        _claim_run(adapter, run_id)
+        stream = adapter._run_streams[run_id] = _RunStream()
+        stream.put_nowait({"event": "message.delta", "delta": "before"})
+
+        async with TestClient(TestServer(_create_runs_app(adapter))) as cli:
+            response = await cli.get(f"/v1/runs/{run_id}/events")
+            await asyncio.sleep(0.05)
+            stream.put_nowait({"event": "message.delta", "delta": "after"})
+            stream.put_nowait(None)
+            frames = self._frames(await asyncio.wait_for(response.text(), timeout=5))
+
+        assert [(f["delta"], f.get("replay", False)) for f in frames] == [("before", True), ("after", False)]
 
 
 # ---------------------------------------------------------------------------
