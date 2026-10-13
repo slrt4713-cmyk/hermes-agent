@@ -405,6 +405,18 @@ For fully headless gateways (messaging bot, no interactive terminal at all), the
 
 **Pitfall — WAF rejects `127.0.0.1` redirect URIs.** A few providers front their authorization server with a WAF that 403s any authorize request whose query string contains a literal `127.0.0.1` (Reclaim.ai's AWS API Gateway is a known example — every attempt returns `{"message":"Forbidden"}` before reaching the OAuth app). Set `oauth.redirect_host: localhost` to use `http://localhost:<port>/callback` instead; the callback listener still binds `127.0.0.1` either way.
 
+**Pitfall: no refresh token, login expires after a few hours.** Some providers grant offline access only when the authorize URL asks for it. Dropbox, for example, issues a refresh token only with `token_access_type=offline`. Add such parameters under `oauth.authorization_params`; Hermes merges them into the authorize URL on every surface (terminal, dashboard, Desktop):
+
+```yaml
+mcp_servers:
+  dropbox:
+    url: "https://mcp.dropbox.com/mcp"
+    auth: oauth
+    oauth:
+      authorization_params:
+        token_access_type: offline
+```
+
 See [OAuth over SSH / Remote Hosts](../../guides/oauth-over-ssh.md#mcp-servers) for the full walkthrough, including DCR-less servers (e.g. Slack), pre-registered `client_id`/`client_secret`, scope customization, and re-auth via `hermes mcp login <server>`.
 
 **Pitfall — providers that don't support automatic registration (Google Drive, Atlassian).** Some servers reject the dynamic client registration step (RFC 7591) that bare `auth: oauth` relies on — Google's official Drive server (`https://drivemcp.googleapis.com/mcp/v1`) returns a `400 Bad Request`, so no OAuth client is created and no token is acquired. The symptom is subtle: these servers also serve `tools/list` *without* auth, so `hermes mcp login` can list the tools and look like it worked, but every real tool call later times out. `hermes mcp login` now detects this (it checks that a token actually landed on disk) and tells you to supply your own OAuth client. Create one in the provider's console and add it to config:
