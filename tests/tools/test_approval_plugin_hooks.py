@@ -363,10 +363,11 @@ class TestClassicCliPromptsFireGatewayTwinHooks:
 
         monkeypatch.setattr(approval_context, "_get_approval_config",
                             lambda: {"mode": "manual", "timeout": 60})
-        # Gateway twin: the notifier answers "once" as soon as the card is sent.
+        # Gateway twin: the notifier answers "once" for the card it was sent, as a button does.
         monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
         approval_module.register_gateway_notify(
-            isolated_session, lambda _data: approval_module.resolve_gateway_approval(isolated_session, "once"))
+            isolated_session, lambda data: approval_module.resolve_gateway_approval(
+                isolated_session, "once", request_id=data["request_id"]))
         try:
             result, gateway_hooks = _capture_hooks(run)
         finally:

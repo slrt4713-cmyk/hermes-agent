@@ -451,6 +451,12 @@ back to the normal schedule. Because zero API calls were made, the re-run is
 spend-neutral and cannot duplicate any side effect. Re-runs also do not count
 toward a job's `repeat` limit: the occurrence they repeat already counted once.
 
+The same re-runs apply when the provider refused every attempt for a transient
+reason before any model call completed: overloaded (503/529), server error,
+rate limited without a stated reset, or timed out. A provider that answers
+"Our servers are currently overloaded" at 7:00 no longer costs a daily brief
+its whole day.
+
 While a re-run is pending, the interim failure notice is suppressed — you get
 the real result when a re-run succeeds, or a normal failure alert once the
 ladder is exhausted. Any run that reaches the model (success or failure)

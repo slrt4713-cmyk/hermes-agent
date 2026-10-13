@@ -145,21 +145,32 @@ def resolve_gateway_approval(session_key: str, choice: str,
     *resolve_all* resolves every pending approval (``/approve all``); otherwise the oldest
     (FIFO) or the one matching *request_id*. *reason* is the ``/deny <reason>`` free text,
     relayed to the agent in the BLOCKED message. Returns the number resolved.
+
+    A request flagged ``require_request_id`` (single-use confirmations: MCP elicitation, untrusted
+    MCP tool, payment fill) is approved only by an answer naming its exact ``request_id``, so a bare
+    ``/approve``, ``/approve all`` or a stale button can never approve a different action; deny
+    always applies. A request with ``allow_session``/``allow_permanent`` false never takes the wider
+    choice.
     """
     with _lock:
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
         if request_id:
-            targets = [entry for entry in queue if entry.data.get("request_id") == request_id]
-            if not targets:
-                return 0
-            queue[:] = [entry for entry in queue if entry not in targets]
+            candidates = [entry for entry in queue if entry.data.get("request_id") == request_id]
         elif resolve_all:
-            targets = list(queue)
-            queue.clear()
+            candidates = list(queue)
         else:
-            targets = [queue.pop(0)]
+            candidates = queue[:1]
+        targets = [
+            entry for entry in candidates
+            if (choice == "deny" or request_id or not entry.data.get("require_request_id"))
+            and (choice != "session" or entry.data.get("allow_session") is not False)
+            and (choice != "always" or entry.data.get("allow_permanent") is not False)
+        ]
+        if not targets:
+            return 0
+        queue[:] = [entry for entry in queue if entry not in targets]
         if not queue:
             _gateway_queues.pop(session_key, None)
         # Popping the entry and committing its outcome are ONE critical section: the waiter's

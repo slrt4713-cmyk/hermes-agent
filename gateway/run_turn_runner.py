@@ -1474,7 +1474,7 @@ class TurnRunner:
                 fut = self._schedule(
                     adapter.send_exec_approval(
                         chat_id=ctx._status_chat_id, command=cmd, session_key=ctx.session_key or "",
-                        description=desc, metadata=ctx._status_thread_metadata, **flags,
+                        description=desc, metadata=ctx._status_thread_metadata, request_id=approval_data.get("request_id"), **flags,
                     ),
                     "send_exec_approval scheduling error",
                 )

@@ -111,6 +111,8 @@ def _tool_completed_preview(result: Any, redact_sensitive_text: Callable[..., st
 
 _RUN_STREAM_SUBSCRIBER_OVERFLOW = object()
 _RUN_STREAM_WRITE_TIMEOUT = 5.0
+RUN_EVENTS_RETENTION = 600  # seconds a finished run's events stay replayable
+RUN_EVENTS_MAX_AGE = 86400  # hard bound for the events of a run that never finishes
 
 
 class _RunStream:
@@ -126,6 +128,7 @@ class _RunStream:
         )
         self.next_seq = 0
         self.terminal = False
+        self.closed_at: Optional[float] = None
 
     def put_nowait(self, event: Optional[dict[str, Any]]) -> None:
         if self.terminal:
@@ -135,6 +138,7 @@ class _RunStream:
         self.backlog.append((seq, event))
         if event is None:
             self.terminal = True
+            self.closed_at = time.time()
         for queue in list(self.subscribers):
             try:
                 queue.put_nowait((seq, event))
@@ -1081,7 +1085,9 @@ async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.
     else:
         return _run_not_found(_api_server._openai_error, run_id)
     stream = self._run_streams[run_id]
-    raw_last_seq = request.headers.get("Last-Event-ID") or request.query.get("last_seq")
+    # ``after`` is the older spelling of ``last_seq``: resume with the events whose SSE id is greater.
+    raw_last_seq = (request.headers.get("Last-Event-ID") or request.query.get("last_seq")
+                    or request.query.get("after"))
     try:
         last_seq = max(-1, int(str(raw_last_seq).strip())) if raw_last_seq is not None else -1
     except (TypeError, ValueError):
@@ -1098,9 +1104,12 @@ async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.
                 response.force_close()
             raise
 
-    async def _write_event(seq: int, event: dict[str, Any]) -> None:
+    async def _write_event(seq: int, event: dict[str, Any], *, replayed: bool = False) -> None:
         payload = dict(event)
         payload["seq"] = seq
+        if replayed:
+            # Produced before this subscription: a resuming client rebuilds from these.
+            payload["replay"] = True
         await _write(_api_server._sse_frame(payload, id=seq))
 
     prepared = False
@@ -1125,7 +1134,7 @@ async def _handle_run_events(self, request: web.Request, *, _api_server) -> web.
             if event is None:
                 await _write(b": stream closed\n\n")
                 return response
-            await _write_event(seq, event)
+            await _write_event(seq, event, replayed=True)
         if stream.terminal and q.empty():
             await _write(b": stream closed\n\n")
             return response
@@ -1210,7 +1219,14 @@ async def _handle_run_approval(self, request: web.Request, *, _api_server) -> we
         return _json_error(
             _openai_error, f"Run has no pending approval: {run_id}", code="approval_not_pending", status=409)
     request_id_field = {"request_id": request_id} if request_id else {}
+    from tools.approval import list_gateway_approvals
+    still_pending = list_gateway_approvals(approval_session_key)
     _mark_run_event(self, run_id, "approval.responded", choice=choice, **request_id_field, resolved=resolved)
+    if still_pending:
+        # Another approval of this run is still waiting: a polling client must keep seeing it
+        # (its approval.request event was already streamed when it was raised).
+        self._set_run_status(run_id, "waiting_for_approval", last_event="approval.request",
+                             approval=_api_server._approval_request_event(run_id, still_pending[0]))
     return web.json_response({
         "object": "hermes.run.approval_response", "run_id": run_id, "choice": choice, **request_id_field,
         "resolved": resolved})
@@ -1281,13 +1297,30 @@ async def _sweep_orphaned_runs(self) -> None:
         self._sweep_orphaned_runs_once(time.time())
 
 
+def _run_transport_expired(self, run_id: str, created_at: float, now: float) -> bool:
+    """A run stays replayable while it runs and for a while after it ends.
+
+    A client that lost its SSE connection (closed tab, phone asleep) resubscribes with
+    ``Last-Event-ID``; dropping the transport of a live run after ``_RUN_STREAM_TTL`` made that
+    impossible for any run longer than the TTL. The backlog is bounded (``_RunStream.BACKLOG_LIMIT``)
+    and so is the number of live runs, so keeping it costs bounded memory."""
+    stream = self._run_streams.get(run_id)
+    if stream is not None and stream.subscribers:
+        return False
+    if stream is not None and stream.terminal:
+        return now - (stream.closed_at or created_at) > RUN_EVENTS_RETENTION
+    task = self._active_run_tasks.get(run_id)
+    if task is not None and not task.done():
+        return now - created_at > RUN_EVENTS_MAX_AGE
+    return now - created_at > self._RUN_STREAM_TTL
+
+
 def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
     """Expire old SSE buffers without treating transport age as run age."""
     if now is None:
         now = time.time()
     for run_id, created_at in list(self._run_streams_created.items()):
-        stream = self._run_streams.get(run_id)
-        if now - created_at <= self._RUN_STREAM_TTL or (stream is not None and stream.subscribers):
+        if not _run_transport_expired(self, run_id, created_at, now):
             continue
         logger.debug("[api_server] sweeping expired run transport %s", run_id)
         task = self._active_run_tasks.get(run_id)

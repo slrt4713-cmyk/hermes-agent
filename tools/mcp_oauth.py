@@ -6,7 +6,8 @@ refresh; this module supplies ``HermesTokenStorage`` (on-disk persistence), the 
 listener and ``build_oauth_auth()`` (legacy entry point). client_id is Hermes' Client ID Metadata
 Document URL (CIMD) when the server supports it, else RFC 7591 DCR. ``mcp_servers.<name>.oauth`` keys
 (all optional): client_id, client_secret, scope, redirect_port, redirect_uri (proxy callback),
-redirect_host, client_name, client_metadata_url, cimd, user_agent, timeout."""
+redirect_host, client_name, client_metadata_url, cimd, user_agent, timeout, authorization_params (extra
+authorize-URL query parameters, e.g. ``token_access_type: offline`` for Dropbox refresh tokens)."""
 
 from pm import install_hint
 import asyncio
@@ -40,7 +41,7 @@ except ImportError:  # pragma: no cover - non-Windows
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from hermes_constants import secure_parent_dir
 from utils import atomic_json_write
@@ -782,16 +783,55 @@ def _announce_authorization_url(
     print(f"  ({note})\n", file=sys.stderr)
 
 
-def _make_redirect_handler(port: int, redirect_uri: str | None = None, redirect_host: str | None = None):
+_AUTH_PARAM_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+def _authorization_query_params(cfg: dict[str, Any]) -> dict[str, str]:
+    """Extra authorize-URL query parameters from ``oauth.authorization_params``.
+
+    Some providers only grant offline access on request: Dropbox issues a refresh token only when the
+    authorize URL carries ``token_access_type=offline``. Keys and values are validated so a config typo
+    can never smuggle control characters or arbitrary structure into the URL."""
+    raw = cfg.get("authorization_params")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("oauth.authorization_params must be a non-empty mapping")
+    params: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or _AUTH_PARAM_KEY.fullmatch(key) is None:
+            raise ValueError("oauth.authorization_params key is invalid")
+        if not isinstance(value, str) or not 1 <= len(value) <= 128 or any(ord(ch) < 32 for ch in value):
+            raise ValueError("oauth.authorization_params value is invalid")
+        params[key] = value
+    return params
+
+
+def _apply_authorization_params(authorization_url: str, extra: dict[str, str]) -> str:
+    """Merge *extra* query parameters into a provider authorize URL (configured values win)."""
+    if not extra:
+        return authorization_url
+    parts = urlparse(authorization_url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update(extra)
+    return urlunparse(parts._replace(query=urlencode(query)))
+
+
+def _make_redirect_handler(port: int, redirect_uri: str | None = None, redirect_host: str | None = None,
+                           extra_params: dict[str, str] | None = None):
     """Redirect handler closing over this flow's port (a closure, not ``_oauth_port``, keeps concurrent
     flows isolated). ``redirect_uri`` is a configured proxy callback (None for loopback) and only tailors the
     hint; ``redirect_host`` is the loopback hostname the provider will actually redirect to (see
-    :func:`_resolve_redirect_uri`).
+    :func:`_resolve_redirect_uri`). ``extra_params`` (``oauth.authorization_params``) is merged into the
+    authorize URL before any surface (dashboard, Desktop, terminal) sees it.
 
     Using a closure instead of reading the module-level ``_oauth_port`` avoids cross-server state pollution
     when multiple MCP servers run OAuth concurrently (fixes #44588).
     """
+    extra = dict(extra_params or {})
+
     async def _redirect_handler(authorization_url: str) -> None:
+        authorization_url = _apply_authorization_params(authorization_url, extra)
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
             await dashboard_flow.publish_authorization_url(authorization_url)
