@@ -202,6 +202,40 @@ class TestTelegramExecApproval:
 class TestTelegramApprovalCallback:
     """Test the approval callback handling in _handle_callback_query."""
 
+    @pytest.mark.asyncio
+    async def test_button_resolves_exactly_the_request_it_was_sent_for(self, monkeypatch):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=42))
+        callbacks = []
+        monkeypatch.setattr(
+            "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+            lambda text, callback_data: callbacks.append(callback_data) or text,
+        )
+        monkeypatch.setattr("plugins.platforms.telegram.adapter.InlineKeyboardMarkup", lambda rows: rows)
+        await adapter.send_exec_approval(
+            chat_id="12345", command="Delete event 42?", session_key="agent:main:telegram:dm:12345",
+            description="MCP confirmation", allow_session=False, allow_permanent=False,
+            request_id="req-42")
+        assert [cb.split(":")[1] for cb in callbacks] == ["once", "deny"]
+        once = callbacks[0]
+
+        query = AsyncMock()
+        query.data = once
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.from_user = MagicMock()
+        query.from_user.first_name = "Norbert"
+        query.from_user.id = "12345"
+        update = MagicMock()
+        update.callback_query = query
+
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+            with patch("tools.approval.resolve_gateway_approval", return_value=1) as resolve:
+                await adapter._handle_callback_query(update, MagicMock())
+
+        resolve.assert_called_once_with("agent:main:telegram:dm:12345", "once", request_id="req-42")
+        assert adapter._approval_request_ids == {}
+
 
     @pytest.mark.asyncio
     async def test_resume_typing_after_inline_approval(self):

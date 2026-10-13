@@ -277,10 +277,15 @@ class ElicitationHandler:
         """Kwargs to pass to ClientSession for elicitation support."""
         return {"elicitation_callback": self}
 
-    def _result(self, action: str, metric: str):
-        """Count *metric* and return ``ElicitResult(action)`` (accept carries empty content)."""
+    # Schema marker a server sets when its confirmation names one exact target (``target-bound-once``):
+    # Hermes echoes it in the accept content as a receipt that the user approved this request alone,
+    # once (tools.approval_prompt.request_elicitation_consent), never a session or permanent scope.
+    _TARGET_BOUND_CONFIRMATION = "target-bound-once"
+
+    def _result(self, action: str, metric: str, content: Optional[dict] = None):
+        """Count *metric* and return ``ElicitResult(action)`` (accept carries *content*, default empty)."""
         self.metrics[metric] += 1
-        return _core.ElicitResult(action=action, **({"content": {}} if action == "accept" else {}))
+        return _core.ElicitResult(action=action, **({"content": dict(content or {})} if action == "accept" else {}))
 
     def _consent_thunk(self, message: str, description: str) -> Callable[[], str]:
         """Sync consent call replaying the agent's contextvars snapshot when the owning task captured one
@@ -320,4 +325,7 @@ class ElicitationHandler:
         except Exception as exc:
             logger.error("MCP server '%s' elicitation failed: %s", self.server_name, exc, exc_info=True)
             return self._result("decline", "errors")
-        return self._result(*self._ANSWER_RESULTS.get(answer, ("decline", "declined")))
+        receipt = None
+        if isinstance(schema, dict) and schema.get("x-hermes-confirmation") == self._TARGET_BOUND_CONFIRMATION:
+            receipt = {"hermes_confirmation": self._TARGET_BOUND_CONFIRMATION}
+        return self._result(*self._ANSWER_RESULTS.get(answer, ("decline", "declined")), content=receipt)
