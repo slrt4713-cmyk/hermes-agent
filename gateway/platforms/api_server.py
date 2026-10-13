@@ -4356,8 +4356,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     # __dict__ membership and patch the module-level implementations) ---------------------
 
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
-    _RUN_EVENTS_RETENTION = 600  # seconds a finished run's events stay replayable
-    _RUN_EVENTS_MAX_AGE = 86400  # hard bound for the events of a run that never finishes
     _RUN_STATUS_TTL = 3600  # seconds to retain terminal run status for polling
 
     def _set_run_status(self, run_id: str, status: str, **fields: Any) -> dict[str, Any]:

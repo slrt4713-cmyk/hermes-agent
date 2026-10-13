@@ -305,3 +305,24 @@ def _rewrite_request_for_ip(request: httpx.Request, ip: str) -> httpx.Request:
 
 def _is_retryable_connect_error(exc: Exception) -> bool:
     return isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError))
+
+
+# A single failed get_me() heartbeat probe on the general request path can be a brief proxy or IPv6
+# routing wobble while the getUpdates long-poll stays healthy; restarting polling on it interrupts a
+# working generation. Recovery starts after this many consecutive failed probes.
+HEARTBEAT_FAILURE_THRESHOLD = 2
+
+
+def record_heartbeat_probe_failure(adapter, error: Exception, describe) -> None:
+    """Count one failed heartbeat probe on *adapter* (``_polling_heartbeat_failure_count``, reset by
+    the adapter on a successful probe) and schedule polling recovery once the threshold is reached.
+    *describe* renders the error for the log."""
+    failures = getattr(adapter, "_polling_heartbeat_failure_count", 0) + 1
+    if failures < HEARTBEAT_FAILURE_THRESHOLD:
+        adapter._polling_heartbeat_failure_count = failures
+        logger.warning(
+            "[%s] Telegram heartbeat probe failed (%d/%d); keeping the active polling generation. Error: %s",
+            adapter.name, failures, HEARTBEAT_FAILURE_THRESHOLD, describe(error))
+        return
+    adapter._polling_heartbeat_failure_count = 0
+    adapter._schedule_polling_recovery(error, reason="heartbeat probe")

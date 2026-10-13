@@ -111,6 +111,8 @@ def _tool_completed_preview(result: Any, redact_sensitive_text: Callable[..., st
 
 _RUN_STREAM_SUBSCRIBER_OVERFLOW = object()
 _RUN_STREAM_WRITE_TIMEOUT = 5.0
+RUN_EVENTS_RETENTION = 600  # seconds a finished run's events stay replayable
+RUN_EVENTS_MAX_AGE = 86400  # hard bound for the events of a run that never finishes
 
 
 class _RunStream:
@@ -1306,10 +1308,10 @@ def _run_transport_expired(self, run_id: str, created_at: float, now: float) -> 
     if stream is not None and stream.subscribers:
         return False
     if stream is not None and stream.terminal:
-        return now - (stream.closed_at or created_at) > self._RUN_EVENTS_RETENTION
+        return now - (stream.closed_at or created_at) > RUN_EVENTS_RETENTION
     task = self._active_run_tasks.get(run_id)
     if task is not None and not task.done():
-        return now - created_at > self._RUN_EVENTS_MAX_AGE
+        return now - created_at > RUN_EVENTS_MAX_AGE
     return now - created_at > self._RUN_STREAM_TTL
 
 

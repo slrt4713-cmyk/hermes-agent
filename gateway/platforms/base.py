@@ -1693,10 +1693,7 @@ class ExecApprovalPrompt:
     description: str
     smart_denied: bool
     metadata: Optional[dict[str, Any]] = None
-    # The pending approval this prompt answers. Adapters that keep it with their button state pass it
-    # back as ``resolve_gateway_approval(..., request_id=...)``: a tap then resolves exactly this request,
-    # which single-use confirmations (MCP elicitation) require.
-    request_id: Optional[str] = None
+    request_id: Optional[str] = None  # pending approval a tap resolves (resolve_gateway_approval(request_id=...))
 
     @property
     def choices(self) -> list[str]:
@@ -2909,8 +2906,7 @@ class BasePlatformAdapter(ABC):
             chat_id=chat_id, session_key=session_key, metadata=metadata, command=str(command or ""),
             description=description, smart_denied=smart_denied, request_id=request_id,
             text=self._format_exec_approval(command, description, smart_denied),
-            actions=self._exec_approval_actions(
-                allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied))
+            actions=self._exec_approval_actions(allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied))
         return await self._send_exec_approval_prompt(prompt)
 
     async def _send_exec_approval_prompt(self, prompt: ExecApprovalPrompt) -> SendResult:
