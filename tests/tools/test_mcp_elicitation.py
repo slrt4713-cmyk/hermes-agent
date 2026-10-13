@@ -49,6 +49,24 @@ def _url_params(message="open this url", url="https://example.com/auth", elicita
 
 
 class TestElicitationHandlerFormMode:
+    def test_target_bound_confirmation_returns_receipt_on_accept(self):
+        handler = ElicitationHandler("m365", {"timeout": 5})
+        params = _form_params("Delete the exact event?", {
+            "type": "object", "properties": {}, "x-hermes-confirmation": "target-bound-once",
+        })
+        with patch("tools.approval_prompt.request_elicitation_consent", return_value="accept"):
+            result = asyncio.run(handler(context=None, params=params))
+        assert result.action == "accept"
+        assert result.content == {"hermes_confirmation": "target-bound-once"}
+
+    def test_target_bound_confirmation_decline_carries_no_receipt(self):
+        handler = ElicitationHandler("m365", {"timeout": 5})
+        params = _form_params("Delete the exact event?", {"x-hermes-confirmation": "target-bound-once"})
+        with patch("tools.approval_prompt.request_elicitation_consent", return_value="decline"):
+            result = asyncio.run(handler(context=None, params=params))
+        assert result.action == "decline"
+        assert result.content is None
+
     def test_user_accepts_once_returns_accept(self):
         handler = ElicitationHandler("pay", {"timeout": 5})
         params = _form_params(

@@ -278,8 +278,9 @@ def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
 
 
 def _consent(choice, unresolved: str) -> str:
-    """Map an approval choice to an elicitation verdict; *unresolved* is the no-answer outcome."""
-    if choice in ("once", "session", "always"):
+    """Map an approval choice to an elicitation verdict; *unresolved* is the no-answer outcome.
+    Only ``once`` accepts: a consent covers exactly the one request the user saw, never a scope."""
+    if choice == "once":
         return "accept"
     return unresolved if choice in ("timeout", "cancelled") else "decline"
 
@@ -292,7 +293,11 @@ def request_elicitation_consent(message: str, description: str, *,
     ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in a
     gateway session, timeouts, and exceptions map to ``"decline"`` so a server
     treats them as "user did not approve" rather than retrying or hanging.
-    Returns ``"accept" | "decline" | "cancel"``."""
+    Returns ``"accept" | "decline" | "cancel"``.
+
+    Each consent is single use and bound to its own request: only ``once`` is
+    offered, and a gateway answer must name this request's ``request_id``
+    (see ``tools.approval.resolve_gateway_approval``)."""
     from tools import approval as _a
     try:
         session_key = _ctx.get_current_session_key()
@@ -319,7 +324,10 @@ def request_elicitation_consent(message: str, description: str, *,
             decision = _gw._await_gateway_decision(
                 session_key, notify_cb, {"command": message, "description": description,
                                          "pattern_key": "mcp_elicitation",
-                                         "pattern_keys": ["mcp_elicitation"]}, surface=surface)
+                                         "pattern_keys": ["mcp_elicitation"],
+                                         "require_request_id": True,
+                                         "allow_session": False, "allow_permanent": False},
+                surface=surface, timeout_seconds=timeout_seconds)
         except Exception as exc:
             logger.error("Elicitation gateway dispatch failed: %s", exc, exc_info=True)
             return "decline"
@@ -346,7 +354,7 @@ def request_elicitation_consent(message: str, description: str, *,
         # allow_permanent=False: elicitation is a per-call confirmation — no pattern to remember.
         # Pass the agent thread's panel callback: without it prompt_toolkit fails the prompt closed unseen.
         choice = prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
-                                           allow_permanent=False, title=title,
+                                           allow_permanent=False, allow_session=False, title=title,
                                            approval_callback=_get_approval_callback())
         hook_choice = choice
     except Exception as exc:
