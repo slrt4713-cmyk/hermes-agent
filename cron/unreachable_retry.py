@@ -5,8 +5,9 @@ Inspired by Claude Cowork (desktop changelog v1.46388.1, 2026-09-04): "automatic
 for example right after the computer wakes behind a VPN."
 
 The class is deliberately narrow: the run must have FAILED with a transient network /
-DNS error (``cron.scheduler_preflight._is_transient_provider_resolve_error``) AND the
-agent must have completed zero API calls. Nothing was executed and nothing was spent, so
+DNS error (``cron.scheduler_preflight._is_transient_provider_resolve_error``) or with the
+provider refusing every attempt for a transient cause (overloaded, 5xx, rate limited,
+timed out: ``TRANSIENT_PROVIDER_REASONS``) AND the agent must have completed zero API calls. Nothing was executed and nothing was spent, so
 re-running cannot double a side effect — unlike a generic failure retry (see PR #16512),
 which has to answer for one-shot dispatch accounting and mid-run side effects. Recurring
 jobs only: finite one-shots are pre-claimed by ``claim_dispatch`` (at-most-times, #38758)
@@ -38,6 +39,11 @@ RETRY_DELAYS_SECONDS: tuple[int, ...] = (300, 900, 1800)
 # that reached the model.
 STATE_KEY = "unreachable_retry"
 
+# Agent-classified terminal causes (``agent.error_classifier.FailoverReason`` values) where the
+# provider refused the request for a transient reason. With zero completed API calls such a run
+# never reached the model either: an overloaded provider must not cost a daily job its whole day.
+TRANSIENT_PROVIDER_REASONS = frozenset({"overloaded", "server_error", "rate_limit", "upstream_rate_limit", "timeout"})
+
 
 def retry_enabled(cfg: Optional[dict] = None) -> bool:
     """``cron.retry_unreachable`` — default ON (spend-neutral: only fires when zero
@@ -56,10 +62,13 @@ def retry_enabled(cfg: Optional[dict] = None) -> bool:
 
 
 def is_model_unreachable_failure(exc: BaseException, agent: Any = None) -> bool:
-    """True when *exc* is a transient network/DNS failure and *agent* (may be ``None``)
-    never completed a model call — the run consumed nothing and executed nothing."""
+    """True when *exc* is a transient network/DNS failure, or an agent-reported failure whose
+    classified cause is in ``TRANSIENT_PROVIDER_REASONS``, and *agent* (may be ``None``) never
+    completed a model call: the run consumed nothing and executed nothing."""
     if int(getattr(agent, "session_api_calls", 0) or 0) > 0:
         return False
+    if getattr(exc, "failure_reason", None) in TRANSIENT_PROVIDER_REASONS:
+        return True
     from cron.scheduler_preflight import _is_transient_provider_resolve_error
 
     return _is_transient_provider_resolve_error(exc)
