@@ -264,6 +264,13 @@ def _resolve_async_wake_sid(origin_wake_sid: str, origin_session_history_deliver
     except Exception:
         return ""
     if origin_wake_sid and origin_session_history_delivery:
+        from tools.delegate_tool_config import _get_api_server_sync
+        if _get_api_server_sync():
+            logger.info(
+                "delegate_task: session %s resumes server history but delegation.api_server_sync is on: "
+                "running the batch synchronously so this turn answers.", origin_wake_sid,
+            )
+            return None
         logger.info(
             "delegate_task: session %s resumes server history — detached result will be persisted "
             "for the next client turn (no model wake).", origin_wake_sid,
