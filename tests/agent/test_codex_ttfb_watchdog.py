@@ -679,3 +679,33 @@ def test_explicit_ttfb_max_seconds_still_caps(tmp_path, monkeypatch):
     wd = h._resolve_nonstream_watchdogs(agent, {"model": "gpt-5.5", "input": huge_input})
 
     assert wd.ttfb_timeout == 90.0, f"explicit cap ignored: {wd.ttfb_timeout}"
+
+
+def test_codex_stale_kill_logs_event_and_progress_ages(tmp_path, monkeypatch, caplog):
+    """A Codex stale kill says how long ago the last SSE frame and the last model
+    progress arrived, so a keepalive-only stall can be told from long reasoning."""
+    import logging
+
+    from agent import chat_completion_helpers as h
+
+    agent = _make_codex_agent(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_CODEX_HARD_TIMEOUT_SECONDS", "3")
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **k: SimpleNamespace())
+    monkeypatch.setattr(agent, "_abort_request_openai_client", lambda c, reason=None: None)
+    monkeypatch.setattr(agent, "_close_request_openai_client", lambda c, reason=None: None)
+    stop = {"flag": False}
+
+    def fake_hang(api_kwargs, client=None, on_first_delta=None):
+        deadline = time.time() + 120
+        while time.time() < deadline and not stop["flag"] and not agent._interrupt_requested:
+            time.sleep(0.02)
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
+    caplog.set_level(logging.WARNING, logger="agent.chat_completion_helpers")
+    try:
+        with pytest.raises(TimeoutError):
+            h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": "x" * 44_000})
+    finally:
+        stop["flag"] = True
+    assert "Codex stale kill detail: last SSE event never, last model progress never" in caplog.text
