@@ -167,3 +167,29 @@ def test_apiserver_session_without_id_stays_synchronous(monkeypatch):
     assert parsed.get("status") != "dispatched", parsed
     assert "SYNCHRONOUSLY" in parsed.get("note", "")
     assert process_registry.completion_queue.empty()
+
+
+def test_apiserver_sync_config_runs_resumable_session_in_turn(monkeypatch):
+    """delegation.api_server_sync: a resumable api_server session runs the batch
+    in the same turn, so a server-side run answers even with the UI closed."""
+    dt = _patch_delegate(monkeypatch)
+    import tools.delegate_tool as delegate_tool
+    monkeypatch.setattr(delegate_tool, "_load_config", lambda: {"api_server_sync": True})
+    monkeypatch.setenv("HERMES_SESSION_ID", "raw-sid-8")
+    set_session_vars(
+        platform="api_server",
+        chat_id="raw-sid-8",
+        session_key="raw-sid-8",
+        session_id="raw-sid-8",
+        session_history_delivery="1",
+        async_delivery=False,
+    )
+
+    out = dt.delegate_task(
+        goal="long research", context="ctx",
+        background=True, parent_agent=_fake_parent(),
+    )
+    parsed = json.loads(out)
+    assert parsed.get("status") != "dispatched", parsed
+    assert "SYNCHRONOUSLY" in parsed.get("note", "")
+    assert process_registry.completion_queue.empty()

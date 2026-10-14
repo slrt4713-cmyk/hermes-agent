@@ -112,6 +112,12 @@ def _get_independent_completions() -> bool:
     completion messages that land as each finishes. Off = one consolidated message when the whole call is done."""
     return is_truthy_value(_cfg().get("independent_completions", False))
 
+def _get_api_server_sync() -> bool:
+    """delegation.api_server_sync (bool, default False): api_server sessions run delegate_task in the same turn
+    instead of persisting a detached result that no model turn consumes until the client writes again. The run
+    lives on the server, so the answer lands even when the web client is closed."""
+    return is_truthy_value(_cfg().get("api_server_sync", False))
+
 def _get_worktree_isolation() -> bool:
     """delegation.worktree_isolation (bool, default False): each child gets its own
     git worktree off the parent's HEAD so parallel children never contend for one
