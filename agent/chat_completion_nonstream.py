@@ -246,6 +246,17 @@ class _NonStreamRequest:
         agent, wd = self.agent, self.wd
         silent_hint = h._codex_silent_hang_hint(agent, self.api_kwargs)
         h._report_stale_nonstream_kill(agent, self.api_kwargs, elapsed, wd.stale_timeout, hint=silent_hint)
+        if wd.codex:
+            # A stale kill with the idle watchdog armed means frames kept arriving: tell keepalive-only
+            # streams (old progress) from a model still reasoning (recent progress).
+            last_event_ts, last_progress_ts, _, _ = self._codex_watchdog_snapshot()
+            now = h.time.time()
+            h.logger.warning(
+                "Codex stale kill detail: last SSE event %s, last model progress %s (idle threshold %.0fs).",
+                f"{now - last_event_ts:.0f}s ago" if last_event_ts is not None else "never",
+                f"{now - last_progress_ts:.0f}s ago" if last_progress_ts is not None else "never",
+                wd.idle_timeout,
+            )
         self._abort_request("stale_call_kill")
         h._bump_stale_streak(agent)
         h._touch_stale_kill_activity(agent, elapsed)
