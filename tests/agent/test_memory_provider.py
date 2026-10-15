@@ -195,6 +195,45 @@ class TestMemoryManager:
         result = mgr.build_system_prompt()
         assert result == "Has content"
 
+    def test_tools_only_manager_disables_implicit_memory_lifecycle(self):
+        """Explicit provider tools must not make cron turns into user memory."""
+        mgr = MemoryManager(tools_only=True)
+        provider = FakeMemoryProvider(
+            "external",
+            tools=[
+                {
+                    "name": "external_remember",
+                    "description": "Remember",
+                    "parameters": {},
+                }
+            ],
+        )
+        provider._prompt_block = "must not be injected"
+        provider._prefetch_result = "must not be prefetched"
+        mgr.add_provider(provider)
+        mgr.initialize_all(session_id="cron-session", platform="cron")
+
+        assert mgr.build_system_prompt() == ""
+        assert mgr.prefetch_all("scheduled prompt") == ""
+        mgr.queue_prefetch_all("scheduled prompt")
+        mgr.sync_all("scheduled prompt", "scheduled result")
+        mgr.on_turn_start(1, "scheduled prompt")
+        mgr.on_session_end([])
+        mgr.on_memory_write("add", "memory", "scheduled content")
+
+        assert provider.prefetch_queries == []
+        assert provider.queued_prefetches == []
+        assert provider.synced_turns == []
+        assert provider.turn_starts == []
+        assert provider.session_end_called is False
+        assert provider.memory_writes == []
+        assert json.loads(
+            mgr.handle_tool_call("external_remember", {"value": "approved"})
+        )["handled"] == "external_remember"
+
+        mgr.shutdown_all()
+        assert provider.shutdown_called is True
+
     def test_prefetch_merges_results(self):
         mgr = MemoryManager()
         p1 = FakeMemoryProvider("builtin")
@@ -1330,10 +1369,13 @@ class TestMemoryToolToolsetGate:
     """
 
     @staticmethod
-    def _run_memory_injection(enabled_toolsets, memory_manager):
+    def _run_memory_injection(
+        enabled_toolsets, memory_manager, *, explicitly_enabled=False
+    ):
         """Run the shared memory-tool injection helper against a fake agent."""
         fake_agent = SimpleNamespace(
             _memory_manager=memory_manager,
+            _memory_provider_tools_enabled=explicitly_enabled,
             enabled_toolsets=enabled_toolsets,
             tools=[],
             valid_tool_names=set(),
@@ -1363,6 +1405,15 @@ class TestMemoryToolToolsetGate:
         mgr = self._mgr_with_tools("fact_store")
         tools, names = self._run_memory_injection(["terminal", "memory", "web"], mgr)
         assert "fact_store" in names
+
+    def test_explicit_provider_tool_opt_in_overrides_toolset_gate(self):
+        """Cron's job-level opt-in exposes provider tools and nothing else."""
+        mgr = self._mgr_with_tools("sibyl_remember")
+        tools, names = self._run_memory_injection(
+            [], mgr, explicitly_enabled=True
+        )
+        assert names == {"sibyl_remember"}
+        assert [tool["function"]["name"] for tool in tools] == ["sibyl_remember"]
 
     def test_composite_toolset_with_memory_injects(self):
         """Composite toolsets that include memory should inject provider tools."""

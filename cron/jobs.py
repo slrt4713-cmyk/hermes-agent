@@ -624,6 +624,7 @@ def create_job(
     script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
+    memory_provider_tools: bool = False,
     workdir: Optional[str] = None,
     no_agent: bool = False,
 ) -> Dict[str, Any]:
@@ -657,6 +658,10 @@ def create_job(
                           When set, only tools from these toolsets are loaded, reducing
                           token overhead. When omitted, all default tools are loaded.
                           Ignored when ``no_agent=True``.
+        memory_provider_tools: When True, expose explicit tools from the active
+                               external memory provider without enabling implicit
+                               memory prompt injection or turn synchronization.
+                               Ignored when ``no_agent=True``.
         workdir: Optional absolute path.  When set, the job runs as if launched
                 from that directory: AGENTS.md / CLAUDE.md / .cursorrules from
                 that directory are injected into the system prompt, and the
@@ -756,6 +761,7 @@ def create_job(
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
+        "memory_provider_tools": memory_provider_tools is True,
         "workdir": normalized_workdir,
     }
 
@@ -847,6 +853,11 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updates["workdir"] = None
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
+
+            if "memory_provider_tools" in updates and not isinstance(
+                updates["memory_provider_tools"], bool
+            ):
+                raise ValueError("memory_provider_tools must be a boolean")
 
             updated = _apply_skill_fields({**job, **updates})
             schedule_changed = "schedule" in updates

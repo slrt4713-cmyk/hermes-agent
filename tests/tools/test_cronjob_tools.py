@@ -264,6 +264,26 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["name"] == "Server Check"
         assert listing["jobs"][0]["state"] == "scheduled"
 
+    def test_memory_provider_tools_are_explicit_and_updateable(self):
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Write the weekly plan",
+                schedule="0 18 * * 0",
+                memory_provider_tools=True,
+            )
+        )
+        assert created["job"]["memory_provider_tools"] is True
+
+        updated = json.loads(
+            cronjob(
+                action="update",
+                job_id=created["job_id"],
+                memory_provider_tools=False,
+            )
+        )
+        assert updated["job"]["memory_provider_tools"] is False
+
     def test_list_handles_partial_legacy_job_records(self):
         from cron.jobs import save_jobs
 
