@@ -168,6 +168,43 @@ class TestClassification:
 
 
 
+    def test_eager_list_keeps_named_mcp_tools_direct(self):
+        """tools.tool_search.eager keeps hot MCP tools in the model-facing array (exact
+        names and globs), so they skip the tool_describe round trip; other MCP tools
+        stay behind the bridge."""
+        from tools.registry import discover_builtin_tools, registry
+        from tools.tool_search import BRIDGE_TOOL_NAMES, ToolSearchConfig, assemble_tool_defs
+
+        discover_builtin_tools()
+        hot_mail = "mcp__eager_probe__list_mail_messages"
+        hot_search = "mcp__eager_files__search"
+        cold = "mcp__eager_files__delete_file"
+        for name, toolset in ((hot_mail, "mcp-eager_probe"), (hot_search, "mcp-eager_files"),
+                              (cold, "mcp-eager_files")):
+            registry.register(name=name, handler=lambda args, **kw: "{}",
+                              schema=_td(name, "probe")["function"], toolset=toolset)
+
+        assembled = assemble_tool_defs(
+            [_td(hot_mail, "probe"), _td(hot_search, "probe"), _td(cold, "probe")],
+            context_length=200_000,
+            config=ToolSearchConfig.from_raw(
+                {"enabled": "on", "eager": ["mcp__eager_probe__*", hot_search]}),
+        )
+        names = {td["function"]["name"] for td in assembled.tool_defs}
+
+        assert assembled.activated
+        assert {hot_mail, hot_search} <= names
+        assert cold not in names
+        assert BRIDGE_TOOL_NAMES <= names
+
+    def test_eager_wins_over_defer_and_rejects_scalars(self):
+        from tools.tool_search import ToolSearchConfig, is_deferrable_tool_name
+
+        cfg = ToolSearchConfig.from_raw({"defer": ["todo_list"], "eager": ["todo_list"]})
+        assert not is_deferrable_tool_name("todo_list", cfg.effective_defer_tools, cfg.eager_tools)
+        assert ToolSearchConfig.from_raw({"eager": "todo_list"}).eager_tools == frozenset()
+        assert ToolSearchConfig.from_raw(None).eager_tools == frozenset()
+
     def test_classify_keeps_unknown_in_visible(self):
         """A tool we can't classify stays visible — never silently dropped.
 
