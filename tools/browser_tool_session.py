@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_constants import hermes_home_key
+from tools.browser_cdp_relay import relay_cdp_url
 from tools.browser_tool_origin import origin as _bt
 from tools import browser_tool_cdp as _cdp
 from tools import browser_tool_cloud as _cloud
@@ -343,7 +344,7 @@ def _create_cloud_session_or_fallback(task_id: str, provider) -> dict[str, Any]:
             raise ValueError(f"Cloud provider returned invalid session: {session_info!r}")
         if session_info.get("cdp_url"):
             session_info = dict(session_info)
-            session_info["cdp_url"] = _cdp._resolve_cdp_override(str(session_info["cdp_url"]))
+            session_info["cdp_url"] = relay_cdp_url(_cdp._resolve_cdp_override(str(session_info["cdp_url"])))
         return session_info
     except Exception as e:
         provider_name = type(provider).__name__
