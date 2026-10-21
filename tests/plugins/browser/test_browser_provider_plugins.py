@@ -187,3 +187,19 @@ class TestPickerIntegration:
         assert names and names == expected
 
 
+
+
+class TestCloudSessionName:
+    """agent-browser builds its socket under /tmp/agent-browser-<name>/ from the session name
+    twice; a 52-char name (task id "run_" + 32 hex) gave a 148-byte path against Linux's
+    103-byte limit, so every cloud navigation failed before reaching the provider."""
+
+    @pytest.mark.parametrize("task_id", ["run_" + "a" * 32, "8ad693fd-864a-4706-b96a-a7ff703a7796", "default"])
+    def test_session_name_keeps_the_agent_browser_socket_under_the_linux_limit(self, task_id: str) -> None:
+        from plugins.browser._common import CloudBrowserProvider
+
+        name = CloudBrowserProvider._session_name(task_id)
+        # Socket path = 44 bytes of fixed parts + the name twice (from agent-browser's error).
+        assert 44 + 2 * len(name) <= 103
+        assert name.startswith("hermes_")
+        assert name != CloudBrowserProvider._session_name(task_id)
