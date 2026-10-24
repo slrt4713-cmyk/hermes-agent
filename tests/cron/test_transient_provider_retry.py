@@ -41,7 +41,9 @@ def test_a_run_that_reached_the_model_is_never_rerun():
     assert not ur.is_model_unreachable_failure(_agent_failure("overloaded"), SimpleNamespace(session_api_calls=2))
 
 
-def test_run_job_flags_an_overloaded_provider_for_the_ladder(tmp_path):
+def test_run_job_flags_an_overloaded_provider_for_the_ladder(tmp_path, monkeypatch, cron_owner):
+    # Runs through the owner execution seam: the flag must ride the result back to the firing job.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     job = {"id": "overloaded-brief", "name": "morning brief", "prompt": "brief me"}
     agent = MagicMock()
     agent.session_api_calls = 0
@@ -54,7 +56,6 @@ def test_run_job_flags_an_overloaded_provider_for_the_ladder(tmp_path):
          patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
          patch("hermes_cli.env_loader.load_hermes_dotenv"), \
          patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-         patch("hermes_state_registry.acquire", return_value=MagicMock()), \
          patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=_RUNTIME), \
          patch("run_agent.AIAgent", return_value=agent):
         success, _output, _final, error = run_job(job)
