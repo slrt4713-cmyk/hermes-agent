@@ -161,8 +161,9 @@ def _cleanup_inactive_browser_sessions():
 
     for task_id in sessions_to_cleanup:
         with _session_owner_scope(task_id):
-            if _human_holds_shared_browser(task_id):
-                # A human took the bot's screen (login, 2FA) — the agent is idle BECAUSE they are working.
+            if _human_holds_shared_browser(task_id) or _handed_over(task_id):
+                # A human took the bot's screen (login, 2FA) or holds a handed-over page (paying):
+                # the agent is idle BECAUSE they are working.
                 _update_session_activity(task_id)
                 continue
         elapsed = int(current_time - _bt._session_last_activity.get(task_id, current_time))
@@ -431,6 +432,12 @@ def _browser_cleanup_thread_worker():
         except Exception as e:
             _bt.logger.warning("Cleanup thread error: %s", e)
 
+        try:
+            from tools.browser_handover_tool import remove_expired_records
+            remove_expired_records()
+        except Exception as e:
+            _bt.logger.warning("Handover record cleanup error: %s", e)
+
         for _ in range(30):  # 1s granularity so stop is quick
             if not _bt._cleanup_running:
                 break
@@ -615,11 +622,26 @@ def _drop_last_active_binding(task_id: str) -> None:
         _bt._last_active_session_key.pop(bare_task_id, None)
 
 
-def cleanup_browser(task_id: Optional[str] = None) -> None:
+def _handed_over(task_id: str) -> bool:
+    """Whether the user holds this session through browser_handover (not yet expired)."""
+    from tools.browser_handover_tool import handover_active
+    with _bt._cleanup_lock:
+        session_info = _bt._active_sessions.get(task_id)
+    return handover_active(session_info)
+
+
+def cleanup_browser(task_id: Optional[str] = None, *, force: bool = False) -> None:
     """Clean up browser session(s) for a task: a bare task id reaps BOTH the primary
-    session and any hybrid local sidecar; a ``::local`` key reaps only that one."""
+    session and any hybrid local sidecar; a ``::local`` key reaps only that one.
+
+    A session handed to the user (browser_handover) survives the per-turn cleanup: the user
+    is paying on it after the agent's reply. The janitor reaps it once the handover expires;
+    ``force`` (shutdown) closes it at once."""
     if task_id is None:
         task_id = "default"
+    if not force and _handed_over(task_id):
+        _bt.logger.info("Keeping browser session for task %s: handed over to the user", task_id)
+        return
 
     session_keys = [task_id]
     sidecar_key = f"{task_id}{_bt._LOCAL_SUFFIX}"
@@ -775,7 +797,7 @@ def cleanup_all_browsers() -> None:
     with _bt._cleanup_lock:
         task_ids = list(_bt._active_sessions.keys())
     for task_id in task_ids:
-        cleanup_browser(task_id)
+        cleanup_browser(task_id, force=True)
 
     try:  # tear down CDP supervisors so background threads exit
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]

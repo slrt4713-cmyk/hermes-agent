@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
 from typing import Any, Dict, Optional
 
+import requests
+
 from agent.secret_scope import get_secret
+from agent.ssl_verify import requests_verify
 from plugins.browser._common import CloudBrowserProvider
 
 logger = logging.getLogger(__name__)
@@ -114,3 +118,28 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
             "cdp_url": session_data["connectUrl"],
             "features": features_enabled,
         }
+
+    def live_view(self, session_id: str) -> list[dict[str, str]]:
+        """The session's open pages with a direct DevTools WebSocket for each, so a person can
+        drive the same page from their own device (browser_handover). The URL carries a
+        session-scoped token and no API key."""
+        config = self._get_config()
+        try:
+            response = requests.get(
+                f"{config['base_url']}/v1/sessions/{session_id}/debug",
+                headers=self._headers(config), timeout=15, verify=requests_verify())
+        except requests.RequestException as exc:
+            raise RuntimeError(f"{self.label} API connection failed: {exc}") from exc
+        if not response.ok:
+            raise RuntimeError(f"{self.label} live view failed: HTTP {response.status_code}")
+        pages = []
+        for page in response.json().get("pages") or []:
+            # debuggerFullscreenUrl is the hosted inspector; its ``wss`` query value is the
+            # page's DevTools endpoint (already carrying ``?t=<token>``).
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(str(page.get("debuggerFullscreenUrl") or "")).query)
+            endpoint = (query.get("wss") or [""])[0]
+            if not endpoint.startswith("connect.browserbase.com/"):
+                continue
+            pages.append({"url": str(page.get("url") or ""), "title": str(page.get("title") or ""),
+                          "ws_url": f"wss://{endpoint}"})
+        return pages
