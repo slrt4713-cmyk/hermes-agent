@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MINUTES = 20
 MAX_MINUTES = 30
 RECORD_DIR_NAME = "browser-handover"
+FIRST_RECORD_DELAY_SECONDS = 1.0
 
 
 def handover_dir() -> Path:
@@ -46,7 +47,11 @@ def _iso(epoch: float) -> str:
 
 def _write_record(record: dict[str, Any]) -> Path:
     directory = handover_dir()
-    directory.mkdir(parents=True, exist_ok=True)
+    if not directory.is_dir():
+        directory.mkdir(parents=True, exist_ok=True)
+        # A client watching this folder (Cockpit's systemd path unit) only starts watching
+        # it once it exists; a record written in the same instant would wait for its timer.
+        time.sleep(FIRST_RECORD_DELAY_SECONDS)
     target = directory / f"{record['id']}.json"
     temporary = directory / f".{record['id']}.{os.getpid()}.tmp"
     temporary.write_text(json.dumps(record), encoding="utf-8")
