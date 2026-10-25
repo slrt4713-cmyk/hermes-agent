@@ -68,6 +68,29 @@ class TestBrowserbaseLiveView:
         assert [p["url"] for p in pages] == ["about:blank", "https://shop.example/checkout"]
         assert pages[1]["ws_url"] == f"wss://{WS}"
 
+    @pytest.mark.parametrize("env, config, expected", [
+        (None, {"browser": {"session_timeout": 3600}}, 3600),
+        ("900", {"browser": {"session_timeout": 3600}}, 900),
+        (None, {"browser": {"session_timeout": True}}, None),
+        (None, {}, None),
+    ])
+    def test_session_timeout_from_env_then_config(self, monkeypatch, env, config, expected):
+        from plugins.browser.browserbase.provider import BrowserbaseBrowserProvider
+
+        monkeypatch.setenv("BROWSERBASE_API_KEY", "bb_key")
+        monkeypatch.setenv("BROWSERBASE_PROJECT_ID", "proj")
+        if env is None:
+            monkeypatch.delenv("BROWSERBASE_SESSION_TIMEOUT", raising=False)
+        else:
+            monkeypatch.setenv("BROWSERBASE_SESSION_TIMEOUT", env)
+        created = MagicMock(ok=True, status_code=200)
+        created.json.return_value = {"id": "sess-1", "connectUrl": "wss://connect.browserbase.com?signingKey=s"}
+        provider = BrowserbaseBrowserProvider()
+        with (patch("hermes_cli.config.read_raw_config", return_value=config),
+              patch.object(provider, "_post_create", return_value=created) as post):
+            provider.create_session("task-1")
+        assert post.call_args.args[2].get("timeout") == expected
+
     def test_http_error_raises(self, monkeypatch):
         from plugins.browser.browserbase.provider import BrowserbaseBrowserProvider
 

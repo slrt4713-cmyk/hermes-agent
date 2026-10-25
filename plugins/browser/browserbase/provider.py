@@ -27,6 +27,21 @@ _PAID_FEATURE_FALLBACKS = (
                 "Bot detection may be less effective."))
 
 
+def _config_session_timeout() -> Optional[str]:
+    """``browser.session_timeout`` (seconds) from the profile config, the deployed alternative
+    to ``BROWSERBASE_SESSION_TIMEOUT``: the project default (5 min) would end a handed-over
+    checkout while the user pays."""
+    try:
+        from hermes_cli.config import read_raw_config
+        value = (read_raw_config().get("browser") or {}).get("session_timeout")
+    except Exception as exc:
+        logger.debug("Could not read browser.session_timeout: %s", exc)
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    return str(value).strip() or None
+
+
 class BrowserbaseBrowserProvider(CloudBrowserProvider):
     """Browserbase (https://browserbase.com) cloud browser backend."""
 
@@ -70,7 +85,7 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
         enable_proxies = os.environ.get("BROWSERBASE_PROXIES", "true").lower() != "false"
         enable_advanced_stealth = os.environ.get("BROWSERBASE_ADVANCED_STEALTH", "false").lower() == "true"
         enable_keep_alive = os.environ.get("BROWSERBASE_KEEP_ALIVE", "true").lower() != "false"
-        custom_timeout_ms = os.environ.get("BROWSERBASE_SESSION_TIMEOUT")
+        custom_timeout_ms = os.environ.get("BROWSERBASE_SESSION_TIMEOUT") or _config_session_timeout()
 
         session_config: dict[str, object] = {"projectId": config["project_id"]}
         if enable_keep_alive:
