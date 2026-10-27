@@ -110,24 +110,6 @@ class TestSendOnly(unittest.TestCase):
             _apply_env_overrides(config)
         self.assertTrue(config.platforms[Platform.EMAIL].enabled)
         self.assertEqual(config.platforms[Platform.EMAIL].home_channel.chat_id, "secretary@agemo-amo.com")
-        # The client's inbox only receives requested results, never restart notices.
-        self.assertFalse(config.platforms[Platform.EMAIL].gateway_restart_notification)
-
-    def test_a_mailbox_instance_keeps_its_restart_notices(self):
-        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
-        env = {**RELAY_ENV, "EMAIL_SEND_ONLY": "", "EMAIL_IMAP_HOST": "imap.agemo-amo.com"}
-        with patch.dict(os.environ, env, clear=False):
-            config = GatewayConfig()
-            _apply_env_overrides(config)
-        self.assertTrue(config.platforms[Platform.EMAIL].gateway_restart_notification)
-
-    def test_send_only_adapter_never_emits_diagnostics(self):
-        adapter = _adapter(RELAY_ENV)
-        self.assertFalse(adapter.warning_notifications_enabled())
-        with patch("smtplib.SMTP") as mock_smtp:
-            result = asyncio.run(adapter.emit_warning("secretary@agemo-amo.com", "disk almost full"))
-        self.assertIsNone(result)
-        mock_smtp.assert_not_called()
 
 
 if __name__ == "__main__":

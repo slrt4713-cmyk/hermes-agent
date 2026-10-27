@@ -617,20 +617,16 @@ class EmailAdapter(BasePlatformAdapter):
             message = f"Not configured — missing {', '.join(missing)}. Set it via `hermes gateway setup` (env) or platforms.email in config.yaml."
             # Non-retryable: a blank-but-present env var used to drive an indefinite retry loop that leaked until OOM.
             return self._fail("[Email] %s", message, "email_missing_configuration", message, retryable=False)
-        if self._send_only:
-            if not self._probe_smtp():
-                return False
-            self._running = True
-            logger.info("[Email] Send-only mode for %s: inbound mail is not polled.", self._address)
-            self._wire_plugin_handlers(None)
-            return True
-        if not self._probe_imap(is_reconnect) or not self._probe_smtp():
+        if not (self._send_only or self._probe_imap(is_reconnect)) or not self._probe_smtp():
             return False
-        if self._require_authenticated_sender and not self._authserv_id and self._address not in EmailAdapter._missing_pin_warned:
+        if self._send_only:
+            logger.info("[Email] Send-only mode for %s: inbound mail is not polled.", self._address)
+        elif self._require_authenticated_sender and not self._authserv_id and self._address not in EmailAdapter._missing_pin_warned:
             EmailAdapter._missing_pin_warned.add(self._address)
             logger.warning("[Email] %s: %s.%s", self._address, _MISSING_AUTHSERV_REASON, _MISSING_AUTHSERV_HINT)
         self._running = True
-        self._poll_task = asyncio.create_task(self._poll_loop())
+        if not self._send_only:
+            self._poll_task = asyncio.create_task(self._poll_loop())
         print(f"[Email] Connected as {self._address}")
         self._wire_plugin_handlers(None)  # plugin-registered native handlers
         return True
@@ -865,12 +861,6 @@ class EmailAdapter(BasePlatformAdapter):
             logger.error(log_fmt, *log_args, e)
             return SendResult(success=False, error=str(e))
 
-    def warning_notifications_enabled(self, logical_platform=None, *, chat_id=None, metadata=None) -> bool:
-        """A send-only mailbox never carries engine diagnostics, only requested results."""
-        if self._send_only:
-            return False
-        return super().warning_notifications_enabled(logical_platform, chat_id=chat_id, metadata=metadata)
-
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Send an email reply to the given address."""
         return await self._run_send(self._send_email, (chat_id, content, reply_to), "[Email] Send failed to %s: %s", chat_id)
@@ -884,9 +874,11 @@ class EmailAdapter(BasePlatformAdapter):
         """Build a threaded reply skeleton. Returns ``(msg, msg_id, subject)``."""
         msg, ctx = MIMEMultipart(), self._thread_context.get(to_addr, {})
         # A reply keeps its thread subject; a first message (cron result, send_message) gets the plain default.
-        subject = ctx.get("subject") or t("platform.email.standalone_subject")
-        if ctx.get("subject") and not subject.startswith("Re:"):
-            subject = f"Re: {subject}"
+        thread = ctx.get("subject")
+        if not thread:
+            subject = t("platform.email.standalone_subject")
+        else:
+            subject = thread if thread.startswith("Re:") else f"Re: {thread}"
         original_msg_id = reply_to_msg_id or ctx.get("message_id")
         threading = (("In-Reply-To", original_msg_id), ("References", original_msg_id)) if original_msg_id else ()
         msg_id = f"<hermes-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
