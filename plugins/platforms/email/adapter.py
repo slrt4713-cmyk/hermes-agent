@@ -483,7 +483,7 @@ class EmailAdapter(BasePlatformAdapter):
         # Relays such as Brevo or SendGrid log in with a technical username, not the From address.
         self._smtp_username = setting("EMAIL_SMTP_USERNAME", "smtp_username").strip() or self._address
         # Send-only: no IMAP mailbox, no inbound polling; the platform only delivers (cron results, send_message).
-        self._send_only = _esecret_bool("EMAIL_SEND_ONLY", is_truthy_value(extra.get("send_only"), default=False))
+        self._send_only = _esecret_bool("EMAIL_SEND_ONLY", False)
         self._poll_interval = _esecret_int("EMAIL_POLL_INTERVAL", 15)
         self._skip_attachments = extra.get("skip_attachments", False)  # platforms.email.skip_attachments
         # Require an authenticated From: domain (SPF/DKIM/DMARC) before trusting it for authorization
@@ -864,6 +864,12 @@ class EmailAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error(log_fmt, *log_args, e)
             return SendResult(success=False, error=str(e))
+
+    def warning_notifications_enabled(self, logical_platform=None, *, chat_id=None, metadata=None) -> bool:
+        """A send-only mailbox never carries engine diagnostics, only requested results."""
+        if self._send_only:
+            return False
+        return super().warning_notifications_enabled(logical_platform, chat_id=chat_id, metadata=metadata)
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Send an email reply to the given address."""
