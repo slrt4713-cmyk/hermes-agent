@@ -52,6 +52,25 @@ def test_a_bare_wider_answer_leaves_a_single_use_confirmation_pending(queued, re
     assert not entry.event.is_set()
 
 
+def test_a_bare_approval_skips_a_single_use_request_ahead_of_it(queued):
+    session, entry = queued
+    regular = _ApprovalEntry({"command": "make clean"})
+    approval._gateway_queues[session].append(regular)
+    assert approval.resolve_gateway_approval(session, "once") == 1
+    assert regular.result == "once" and not entry.event.is_set()
+
+
+def test_a_wider_bare_answer_on_a_request_without_that_scope_counts_once():
+    session = "test-no-scope"
+    entry = _ApprovalEntry({"command": "make clean", "allow_session": False, "allow_permanent": False})
+    approval._gateway_queues[session] = [entry]
+    try:
+        assert approval.resolve_gateway_approval(session, "session") == 1
+        assert entry.result == "once"
+    finally:
+        approval._gateway_queues.pop(session, None)
+
+
 def test_deny_still_applies_without_request_id(queued):
     session, entry = queued
     assert approval.resolve_gateway_approval(session, "deny") == 1

@@ -75,8 +75,13 @@ def remove_expired_records(*, now: Optional[float] = None) -> None:
             path.unlink(missing_ok=True)
 
 
-def _pick_page(pages: list[dict[str, str]]) -> Optional[dict[str, str]]:
-    """The newest web page: browser_exec keeps no current page outside its Python session."""
+def _pick_page(pages: list[dict[str, str]], url: str = "") -> Optional[dict[str, str]]:
+    """The page at *url*, else the last web page: browser_exec keeps no current page outside its
+    Python session, so only the agent knows which tab it reached."""
+    if url:
+        for page in pages:
+            if page.get("url") == url:
+                return page
     web_pages = [page for page in pages if page.get("url", "").startswith(("https://", "http://"))]
     return web_pages[-1] if web_pages else None
 
@@ -91,7 +96,7 @@ def _find_cloud_session(task_id: str) -> tuple[Optional[str], Optional[dict[str,
     return None, None
 
 
-def browser_handover(minutes: Any = None, task_id: Optional[str] = None) -> str:
+def browser_handover(minutes: Any = None, task_id: Optional[str] = None, url: Any = None) -> str:
     from tools import browser_session as _bs
     from tools import browser_session_cloud as _cloud
     from tools import browser_session_lifecycle as _lifecycle
@@ -113,7 +118,7 @@ def browser_handover(minutes: Any = None, task_id: Optional[str] = None) -> str:
         return json.dumps({"success": False, "error_type": "unsupported",
                            "error": "This browser backend cannot hand a page to the user."})
     try:
-        page = _pick_page(live_view(session_info["bb_session_id"]))
+        page = _pick_page(live_view(session_info["bb_session_id"]), str(url or "").strip())
     except Exception as exc:  # health: allow BLE001 -- provider/network failure reaches the agent as a tool error
         logger.warning("browser_handover: live view failed: %s", exc)
         return json.dumps({"success": False, "error_type": "live_view_failed",
@@ -163,6 +168,8 @@ BROWSER_HANDOVER_SCHEMA = {
         "properties": {
             "minutes": {"type": "integer", "description": f"How long the user keeps the page (default "
                                                           f"{DEFAULT_MINUTES}, at most {MAX_MINUTES})."},
+            "url": {"type": "string", "description": "The exact URL of the page to hand over, when several "
+                                                     "tabs are open."},
         },
         "required": [],
     },
@@ -170,7 +177,8 @@ BROWSER_HANDOVER_SCHEMA = {
 
 
 def _handle_handover(args: dict[str, Any], **kwargs) -> str:
-    return browser_handover(minutes=(args or {}).get("minutes"), task_id=kwargs.get("task_id"))
+    args = args or {}
+    return browser_handover(minutes=args.get("minutes"), task_id=kwargs.get("task_id"), url=args.get("url"))
 
 
 def _check_handover_available() -> bool:

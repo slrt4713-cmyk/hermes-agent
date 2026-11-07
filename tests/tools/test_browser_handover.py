@@ -133,6 +133,14 @@ class TestBrowserHandover:
         assert result["success"] is True
         assert handover.handover_active(sessions._active_sessions["task-1@profile-a"])
 
+    def test_url_picks_the_tab_the_agent_reached(self, sessions):
+        _open_cloud_session(sessions)
+        pages = [{"url": "https://shop.example/checkout", "title": "Checkout", "ws_url": f"wss://{WS}"},
+                 {"url": "https://shop.example/popup", "title": "Popup", "ws_url": "wss://connect.browserbase.com/p"}]
+        with patch("tools.browser_session_cloud.get_cloud_provider", return_value=_provider(pages)):
+            result = json.loads(handover.browser_handover(task_id="task-1", url="https://shop.example/checkout"))
+        assert result["page_title"] == "Checkout"
+
     def test_minutes_are_capped(self, sessions):
         _open_cloud_session(sessions)
         pages = [{"url": "https://shop.example/checkout", "title": "Checkout", "ws_url": f"wss://{WS}"}]

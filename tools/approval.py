@@ -161,7 +161,7 @@ def resolve_gateway_approval(session_key: str, choice: str,
     MCP tool, payment fill) is approved only by an answer naming its exact ``request_id``, so a bare
     ``/approve``, ``/approve all`` or a stale button can never approve a different action; deny
     always applies. A request with ``allow_session``/``allow_permanent`` false never takes the wider
-    choice: an answer naming it counts as ``once``, any other answer leaves it pending.
+    choice: the answer counts as ``once``.
     """
     with _lock:
         queue = _gateway_queues.get(session_key)
@@ -171,13 +171,13 @@ def resolve_gateway_approval(session_key: str, choice: str,
             candidates = [entry for entry in queue if entry.data.get("request_id") == request_id]
         elif resolve_all:
             candidates = list(queue)
-        else:
+        elif choice == "deny":
             candidates = queue[:1]
-        targets = [
-            entry for entry in candidates
-            if choice == "deny" or request_id or (
-                not entry.data.get("require_request_id") and _offers_scope(entry.data, choice))
-        ]
+        else:
+            # A bare approval skips single-use requests: it cannot approve them, nor wait behind them.
+            candidates = [entry for entry in queue if not entry.data.get("require_request_id")][:1]
+        targets = [entry for entry in candidates
+                   if choice == "deny" or request_id or not entry.data.get("require_request_id")]
         if not targets:
             return 0
         queue[:] = [entry for entry in queue if entry not in targets]
