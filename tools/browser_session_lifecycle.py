@@ -160,7 +160,8 @@ def cleanup_single_session(cache_key: str) -> None:
 def cleanup_browser(task_id: Optional[str] = None) -> None:
     """Close the sessions serving ``task_id``: its exact key, its hybrid ``::local`` sidecar, and the
     served-profile-tagged keys browser_exec builds for it (``<task>@<home>``). Per-turn cleanup calls this
-    with the bare task id."""
+    with the bare task id. A session handed to the user (browser_handover) survives it: the user is paying
+    on it after the agent's reply; the janitor reaps it once the handover expires and shutdown closes it."""
     task = task_id or "default"
     bs = _bs()
     with bs._cleanup_lock:
@@ -168,8 +169,12 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
             keys = [task] if task in bs._active_sessions else []
         else:
             keys = [key for key in bs._active_sessions if key == task or bs.owner_task_id(key) == task]
+    kept = [key for key in keys if _handed_over(key)]
+    for key in kept:
+        logger.info("Keeping browser session %s: handed over to the user", key)
     for key in keys:
-        cleanup_single_session(key)
+        if key not in kept:
+            cleanup_single_session(key)
     if not keys:
         _forget_session_tracking(task)
 
@@ -281,6 +286,15 @@ def _human_holds_shared_browser(cache_key: str) -> bool:
     return bool(session_info) and bs.human_holds_shared_browser(session_info)
 
 
+def _handed_over(cache_key: str) -> bool:
+    """Whether the user holds this session through browser_handover (not yet expired)."""
+    from tools.browser_handover_tool import handover_active
+    bs = _bs()
+    with bs._cleanup_lock:
+        session_info = bs._active_sessions.get(cache_key)
+    return handover_active(session_info)
+
+
 def _force_reap(cache_key: str) -> None:
     """Janitor last resort after repeated failures (#100738): drop the record, release the backend."""
     from tools.browser_session_cdp import stop_cdp_supervisor
@@ -317,7 +331,9 @@ def _cleanup_one_inactive(cache_key: str, elapsed: int) -> None:
 
 def cleanup_inactive_sessions() -> None:
     """Close sessions idle past ``BROWSER_SESSION_INACTIVITY_TIMEOUT`` (janitor thread), each under its owner
-    profile's scope. A human holding the Bot Desktop lease counts as activity."""
+    profile's scope. A human holding the Bot Desktop lease or a handed-over page counts as activity."""
+    from tools.browser_handover_tool import remove_expired_records
+    _best_effort("Handover record cleanup", remove_expired_records)
     bs = _bs()
     now = time.time()
     with bs._cleanup_lock:
@@ -325,7 +341,7 @@ def cleanup_inactive_sessions() -> None:
                 if now - last > bs.BROWSER_SESSION_INACTIVITY_TIMEOUT]
     for key, elapsed in idle:
         with _session_owner_scope(key):
-            if _human_holds_shared_browser(key):
+            if _human_holds_shared_browser(key) or _handed_over(key):
                 update_session_activity(key)
                 continue
         _cleanup_one_inactive(key, elapsed)
