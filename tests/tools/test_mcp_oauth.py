@@ -1135,3 +1135,54 @@ def test_humanize_404_non_registration_passthrough():
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# oauth.authorization_params: extra authorize-URL query parameters
+# ---------------------------------------------------------------------------
+
+
+def test_authorization_query_params_validates_config():
+    from tools.mcp_oauth import _authorization_query_params
+
+    assert _authorization_query_params({}) == {}
+    assert _authorization_query_params(
+        {"authorization_params": {"token_access_type": "offline"}}) == {"token_access_type": "offline"}
+    for bad in ("offline", {}, {"": "offline"}, {"1key": "x"}, {"token_access_type": "off\nline"},
+                {"token_access_type": 1}, {"token_access_type": "x" * 129}):
+        with pytest.raises(ValueError):
+            _authorization_query_params({"authorization_params": bad})
+
+
+def test_apply_authorization_params_merges_into_existing_query():
+    from urllib.parse import parse_qs, urlparse
+
+    from tools.mcp_oauth import _apply_authorization_params
+
+    url = "https://www.dropbox.com/oauth2/authorize?client_id=abc&state=s1"
+    assert _apply_authorization_params(url, {}) == url
+    query = parse_qs(urlparse(_apply_authorization_params(url, {"token_access_type": "offline"})).query)
+    assert query == {"client_id": ["abc"], "state": ["s1"], "token_access_type": ["offline"]}
+
+
+def test_configured_authorization_params_reach_the_printed_authorize_url(tmp_path, monkeypatch, capsys):
+    """End to end: config -> provider -> the URL the user is asked to open."""
+    import tools.mcp_oauth as mod
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _set_interactive_stdin(monkeypatch)
+    monkeypatch.setattr(mod, "_is_interactive", lambda: True)
+    monkeypatch.setattr(mod, "_can_open_browser", lambda: False)
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    provider = build_oauth_auth("dropbox", "https://mcp.dropbox.example/mcp", {
+        "authorization_params": {"token_access_type": "offline"},
+    })
+    assert provider is not None
+
+    asyncio.run(provider.context.redirect_handler(
+        "https://www.dropbox.com/oauth2/authorize?client_id=abc&state=s1"))
+
+    err = capsys.readouterr().err
+    assert "token_access_type=offline" in err
+    assert "client_id=abc" in err
