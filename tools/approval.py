@@ -141,6 +141,12 @@ def unregister_gateway_notify(session_key: str) -> None:
             entry.event.set()
 
 
+def _offers_scope(data: dict, choice: str) -> bool:
+    """Whether a pending request offered this answer's scope (``session``/``always``)."""
+    key = {"session": "allow_session", "always": "allow_permanent"}.get(choice)
+    return key is None or data.get(key) is not False
+
+
 def resolve_gateway_approval(session_key: str, choice: str,
                              resolve_all: bool = False,
                              reason: Optional[str] = None,
@@ -155,7 +161,7 @@ def resolve_gateway_approval(session_key: str, choice: str,
     MCP tool, payment fill) is approved only by an answer naming its exact ``request_id``, so a bare
     ``/approve``, ``/approve all`` or a stale button can never approve a different action; deny
     always applies. A request with ``allow_session``/``allow_permanent`` false never takes the wider
-    choice.
+    choice: an answer naming it counts as ``once``, any other answer leaves it pending.
     """
     with _lock:
         queue = _gateway_queues.get(session_key)
@@ -169,9 +175,8 @@ def resolve_gateway_approval(session_key: str, choice: str,
             candidates = queue[:1]
         targets = [
             entry for entry in candidates
-            if (choice == "deny" or request_id or not entry.data.get("require_request_id"))
-            and (choice != "session" or entry.data.get("allow_session") is not False)
-            and (choice != "always" or entry.data.get("allow_permanent") is not False)
+            if choice == "deny" or request_id or (
+                not entry.data.get("require_request_id") and _offers_scope(entry.data, choice))
         ]
         if not targets:
             return 0
@@ -182,7 +187,7 @@ def resolve_gateway_approval(session_key: str, choice: str,
         # ``_drop_entry`` reads ``entry.result`` under this same lock after its deadline check, so a
         # choice acked to the client here can never be popped-and-lost as a timeout (#112548).
         for entry in targets:
-            entry.result = choice
+            entry.result = choice if _offers_scope(entry.data, choice) else "once"
             if reason:
                 entry.reason = reason
             entry.event.set()

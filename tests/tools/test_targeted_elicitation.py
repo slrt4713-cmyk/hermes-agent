@@ -38,10 +38,17 @@ def test_old_button_cannot_approve_a_newer_action(queued):
     assert approval.resolve_gateway_approval(session, "once", request_id=entry.data["request_id"]) == 0
 
 
-def test_session_and_permanent_scopes_cannot_authorize_single_use_confirmation(queued):
+@pytest.mark.parametrize("choice", ["session", "always"])
+def test_a_wider_answer_naming_the_request_counts_once(queued, choice):
     session, entry = queued
-    for choice in ("session", "always"):
-        assert approval.resolve_gateway_approval(session, choice, request_id=entry.data["request_id"]) == 0
+    assert approval.resolve_gateway_approval(session, choice, request_id=entry.data["request_id"]) == 1
+    assert entry.result == "once"
+
+
+@pytest.mark.parametrize("resolve_all", [False, True])
+def test_a_bare_wider_answer_leaves_a_single_use_confirmation_pending(queued, resolve_all):
+    session, entry = queued
+    assert approval.resolve_gateway_approval(session, "always", resolve_all=resolve_all) == 0
     assert not entry.event.is_set()
 
 

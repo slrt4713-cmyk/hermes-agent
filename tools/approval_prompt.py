@@ -278,9 +278,8 @@ def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
 
 
 def _consent(choice, unresolved: str) -> str:
-    """Map an approval choice to an elicitation verdict; *unresolved* is the no-answer outcome.
-    Only ``once`` accepts: a consent covers exactly the one request the user saw, never a scope."""
-    if choice == "once":
+    """Map an approval choice to an elicitation verdict; *unresolved* is the no-answer outcome."""
+    if choice in ("once", "session", "always"):
         return "accept"
     return unresolved if choice in ("timeout", "cancelled") else "decline"
 
