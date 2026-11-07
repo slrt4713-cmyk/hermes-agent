@@ -278,8 +278,9 @@ def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
 
 
 def _consent(choice, unresolved: str) -> str:
-    """Map an approval choice to an elicitation verdict; *unresolved* is the no-answer outcome."""
-    if choice in ("once", "session", "always"):
+    """Map an approval choice to an elicitation verdict; *unresolved* is the no-answer outcome.
+    Only ``once`` accepts: a consent covers exactly the one request the user saw, never a scope."""
+    if choice == "once":
         return "accept"
     return unresolved if choice in ("timeout", "cancelled") else "decline"
 
@@ -306,7 +307,9 @@ def request_elicitation_consent(message: str, description: str, *,
 
     Without *remember_key* the consent covers one call, so every surface offers only
     once/deny. With it, the session and always choices are offered and recorded under
-    that approval key; the caller checks ``tools.approval.is_approved`` before asking."""
+    that approval key; the caller checks ``tools.approval.is_approved`` before asking.
+    Either way a gateway answer must name this request's ``request_id``
+    (see ``tools.approval.resolve_gateway_approval``)."""
     from tools import approval as _a
     try:
         session_key = _ctx.get_current_session_key()
@@ -339,7 +342,9 @@ def request_elicitation_consent(message: str, description: str, *,
                 session_key, notify_cb, {"command": message, "description": description,
                                          "pattern_key": "mcp_elicitation",
                                          "pattern_keys": ["mcp_elicitation"],
-                                         "allow_session": scoped, "allow_permanent": scoped}, surface=surface)
+                                         "require_request_id": True,
+                                         "allow_session": scoped, "allow_permanent": scoped},
+                surface=surface, timeout_seconds=timeout_seconds)
         except Exception as exc:
             logger.error("Elicitation gateway dispatch failed: %s", exc, exc_info=True)
             return "decline"
