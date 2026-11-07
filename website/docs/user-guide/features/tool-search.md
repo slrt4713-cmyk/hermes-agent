@@ -24,7 +24,9 @@ may be deferred when they are named in `tools.tool_search.defer`; the shipped
 curated list covers tools such as `computer_use`, `session_search`, and selected
 desktop helpers. MCP and non-core plugin tools remain eligible automatically.
 An explicit `defer` list replaces the curated list, and `defer: []` keeps every
-tool eager.
+built-in tool eager. MCP and plugin tools still defer unless they are listed in
+`tools.tool_search.eager` (exact names or globs such as `mcp__mail__*`), which
+keeps a profile's few hot tools direct and wins over `defer`.
 :::
 
 ## How it works
