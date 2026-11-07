@@ -248,6 +248,7 @@ def _create_local_session(cache_key: str, allow_real_profile: bool = True) -> di
 def _create_cloud_session_or_fallback(cache_key: str, provider) -> dict[str, Any]:
     """Cloud session; on failure (429, quota, outage) a LOCAL launcher session marked ``fallback_from_cloud``.
     ``cdp_url`` is resolved here because some providers return an HTTP discovery URL."""
+    from tools.browser_cdp_relay import relay_cdp_url
     from tools.browser_session_cdp import resolve_cdp_override
     try:
         session_info = provider.create_session(cache_key)
@@ -265,7 +266,7 @@ def _create_cloud_session_or_fallback(cache_key: str, provider) -> dict[str, Any
         return {**local, "fallback_from_cloud": True, "fallback_reason": str(e), "fallback_provider": provider_name}
     session_info = dict(session_info)
     if session_info.get("cdp_url"):
-        session_info["cdp_url"] = resolve_cdp_override(str(session_info["cdp_url"]))
+        session_info["cdp_url"] = relay_cdp_url(resolve_cdp_override(str(session_info["cdp_url"])))
     return session_info
 
 

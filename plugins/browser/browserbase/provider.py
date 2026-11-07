@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
 from typing import Any, Dict, Optional
 
+import requests
+
 from agent.secret_scope import get_secret
+from agent.ssl_verify import requests_verify
 from plugins.browser._common import CloudBrowserProvider
 
 logger = logging.getLogger(__name__)
@@ -21,6 +25,21 @@ _PAID_FEATURE_FALLBACKS = (
                   "Sessions may timeout during long operations."),
     ("proxies", "Proxies unavailable (402), retrying without proxies. "
                 "Bot detection may be less effective."))
+
+
+def _config_session_timeout() -> Optional[str]:
+    """``browser.session_timeout`` (seconds) from the profile config, the deployed alternative
+    to ``BROWSERBASE_SESSION_TIMEOUT``: the project default (5 min) would end a handed-over
+    checkout while the user pays."""
+    try:
+        from hermes_cli.config import read_raw_config
+        value = (read_raw_config().get("browser") or {}).get("session_timeout")
+    except Exception as exc:
+        logger.debug("Could not read browser.session_timeout: %s", exc)
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    return str(value).strip() or None
 
 
 class BrowserbaseBrowserProvider(CloudBrowserProvider):
@@ -66,7 +85,7 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
         enable_proxies = os.environ.get("BROWSERBASE_PROXIES", "true").lower() != "false"
         enable_advanced_stealth = os.environ.get("BROWSERBASE_ADVANCED_STEALTH", "false").lower() == "true"
         enable_keep_alive = os.environ.get("BROWSERBASE_KEEP_ALIVE", "true").lower() != "false"
-        custom_timeout_ms = os.environ.get("BROWSERBASE_SESSION_TIMEOUT")
+        custom_timeout_ms = os.environ.get("BROWSERBASE_SESSION_TIMEOUT") or _config_session_timeout()
 
         session_config: dict[str, object] = {"projectId": config["project_id"]}
         if enable_keep_alive:
@@ -114,3 +133,28 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
             "cdp_url": session_data["connectUrl"],
             "features": features_enabled,
         }
+
+    def live_view(self, session_id: str) -> list[dict[str, str]]:
+        """The session's open pages with a direct DevTools WebSocket for each, so a person can
+        drive the same page from their own device (browser_handover). The URL carries a
+        session-scoped token and no API key."""
+        config = self._get_config()
+        try:
+            response = requests.get(
+                f"{config['base_url']}/v1/sessions/{session_id}/debug",
+                headers=self._headers(config), timeout=15, verify=requests_verify())
+        except requests.RequestException as exc:
+            raise RuntimeError(f"{self.label} API connection failed: {exc}") from exc
+        if not response.ok:
+            raise RuntimeError(f"{self.label} live view failed: HTTP {response.status_code}")
+        pages = []
+        for page in response.json().get("pages") or []:
+            # debuggerFullscreenUrl is the hosted inspector; its ``wss`` query value is the
+            # page's DevTools endpoint (already carrying ``?t=<token>``).
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(str(page.get("debuggerFullscreenUrl") or "")).query)
+            endpoint = (query.get("wss") or [""])[0]
+            if not endpoint.startswith("connect.browserbase.com/"):
+                continue
+            pages.append({"url": str(page.get("url") or ""), "title": str(page.get("title") or ""),
+                          "ws_url": f"wss://{endpoint}"})
+        return pages
