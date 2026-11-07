@@ -489,8 +489,9 @@ _MEDIA_SEND_READ_TIMEOUT = 60.0
 # Inbound media fetch (getFile + download): a Hetzner->Telegram blip of a few minutes used to ask the
 # user to resend each attachment. The file_id stays valid, so transient errors retry with growing
 # delays. The deadline bounds the sleeps so one chat's handler stays well under the 300s stall bound.
-_MEDIA_FETCH_RETRY_DELAYS = (5.0, 15.0, 30.0, 60.0, 60.0)
-_MEDIA_FETCH_DEADLINE_SECONDS = 150.0
+# Updates of one chat run in order: a long retry here would hold /stop and approval taps behind it.
+_MEDIA_FETCH_RETRY_DELAYS = (2.0, 5.0, 10.0)
+_MEDIA_FETCH_DEADLINE_SECONDS = 30.0
 # Text send used to hang forever on a shielded httpcore socket (NordVPN/Telegram sticky IP).
 # A wedged send froze getUpdates on the same loop. Bound every text send/edit and media upload.
 _TEXT_SEND_DEADLINE = 30.0

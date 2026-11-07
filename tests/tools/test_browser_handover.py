@@ -141,6 +141,25 @@ class TestBrowserHandover:
             result = json.loads(handover.browser_handover(task_id="task-1", url="https://shop.example/checkout"))
         assert result["page_title"] == "Checkout"
 
+    def test_handover_never_outlasts_the_cloud_session(self, sessions):
+        _open_cloud_session(sessions)
+        sessions._active_sessions["task-1"]["expires_at"] = time.time() + 600
+        pages = [{"url": "https://shop.example/checkout", "title": "Checkout", "ws_url": f"wss://{WS}"}]
+        with patch("tools.browser_session_cloud.get_cloud_provider", return_value=_provider(pages)):
+            result = json.loads(handover.browser_handover(minutes=20, task_id="task-1"))
+        record = json.loads((handover.handover_dir() / f"{result['handover_id']}.json").read_text())
+        assert record["expires_epoch"] <= sessions._active_sessions["task-1"]["expires_at"]
+        assert "for 9 minutes" in result["instructions"] or "for 10 minutes" in result["instructions"]
+
+    def test_a_session_about_to_end_is_not_handed_over(self, sessions):
+        _open_cloud_session(sessions)
+        sessions._active_sessions["task-1"]["expires_at"] = time.time() + 30
+        pages = [{"url": "https://shop.example/checkout", "title": "Checkout", "ws_url": f"wss://{WS}"}]
+        with patch("tools.browser_session_cloud.get_cloud_provider", return_value=_provider(pages)):
+            result = json.loads(handover.browser_handover(task_id="task-1"))
+        assert result["error_type"] == "session_ending"
+        assert not handover.handover_active(sessions._active_sessions["task-1"])
+
     def test_minutes_are_capped(self, sessions):
         _open_cloud_session(sessions)
         pages = [{"url": "https://shop.example/checkout", "title": "Checkout", "ws_url": f"wss://{WS}"}]

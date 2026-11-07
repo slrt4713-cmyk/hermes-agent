@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MINUTES = 20
 MAX_MINUTES = 30
+MIN_REMAINING_SECONDS = 120  # below this the user could not finish on the page
 RECORD_DIR_NAME = "browser-handover"
 FIRST_RECORD_DELAY_SECONDS = 1.0
 
@@ -129,6 +130,14 @@ def browser_handover(minutes: Any = None, task_id: Optional[str] = None, url: An
 
     now = time.time()
     expires = now + minutes * 60
+    session_end = _lifecycle._session_expiry_timestamp(session_info)  # the provider closes the page then
+    if session_end is not None:
+        expires = min(expires, session_end)
+    if expires - now < MIN_REMAINING_SECONDS:
+        return json.dumps({"success": False, "error_type": "session_ending",
+                           "error": "This browser session ends too soon to hand it over. Open the page "
+                                    "again in a new session, then hand it over."})
+    minutes = int((expires - now) // 60)
     handover_id = secrets.token_urlsafe(12)
     _write_record({
         "id": handover_id,

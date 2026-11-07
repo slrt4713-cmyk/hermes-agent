@@ -131,6 +131,7 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
             "session_name": session_name,
             "bb_session_id": session_data["id"],
             "cdp_url": session_data["connectUrl"],
+            "expires_at": session_data.get("expiresAt"),
             "features": features_enabled,
         }
 
