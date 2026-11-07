@@ -34,7 +34,7 @@ def _config_session_timeout() -> Optional[str]:
     try:
         from hermes_cli.config import read_raw_config
         value = (read_raw_config().get("browser") or {}).get("session_timeout")
-    except Exception as exc:
+    except Exception as exc:  # health: allow BLE001 -- unreadable config means no custom timeout
         logger.debug("Could not read browser.session_timeout: %s", exc)
         return None
     if isinstance(value, bool) or not isinstance(value, (int, str)):

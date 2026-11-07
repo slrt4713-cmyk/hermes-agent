@@ -173,7 +173,7 @@ def test_apiserver_sync_config_runs_resumable_session_in_turn(monkeypatch):
     """delegation.api_server_sync: a resumable api_server session runs the batch
     in the same turn, so a server-side run answers even with the UI closed."""
     dt = _patch_delegate(monkeypatch)
-    import tools.delegate_tool as delegate_tool
+    from tools import delegate_tool
     monkeypatch.setattr(delegate_tool, "_load_config", lambda: {"api_server_sync": True})
     monkeypatch.setenv("HERMES_SESSION_ID", "raw-sid-8")
     set_session_vars(

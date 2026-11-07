@@ -1569,6 +1569,10 @@ async def _sweep_orphaned_runs(self) -> None:
         self._sweep_orphaned_runs_once(time.time())
 
 
+_RUN_EVENTS_RETENTION = 600  # seconds a finished run's events stay replayable
+_RUN_EVENTS_MAX_AGE = 86400  # hard bound for the events of a run that never finishes
+
+
 def _run_transport_expired(self, run_id: str, created_at: float, now: float) -> bool:
     """A run stays replayable while it runs and for a while after it ends.
 
@@ -1580,10 +1584,10 @@ def _run_transport_expired(self, run_id: str, created_at: float, now: float) -> 
     if stream is not None and stream.subscribers:
         return False
     if stream is not None and stream.terminal:
-        return now - (stream.closed_at or created_at) > self._RUN_EVENTS_RETENTION
+        return now - (stream.closed_at or created_at) > _RUN_EVENTS_RETENTION
     task = self._active_run_tasks.get(run_id)
     if task is not None and not task.done():
-        return now - created_at > self._RUN_EVENTS_MAX_AGE
+        return now - created_at > _RUN_EVENTS_MAX_AGE
     return now - created_at > self._RUN_STREAM_TTL
 
 

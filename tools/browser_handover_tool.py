@@ -68,7 +68,7 @@ def remove_expired_records(*, now: Optional[float] = None) -> None:
         return
     for path in directory.glob("*.json"):
         try:
-            expires = float(json.loads(path.read_text(encoding="utf-8")).get("expires_epoch", 0))
+            expires = float(json.loads(path.read_text(encoding="utf-8-sig")).get("expires_epoch", 0))
         except (OSError, ValueError, TypeError, AttributeError):
             expires = 0
         if expires <= current:
@@ -114,7 +114,7 @@ def browser_handover(minutes: Any = None, task_id: Optional[str] = None) -> str:
                            "error": "This browser backend cannot hand a page to the user."})
     try:
         page = _pick_page(live_view(session_info["bb_session_id"]))
-    except Exception as exc:  # provider/network failure must reach the agent as a tool error
+    except Exception as exc:  # health: allow BLE001 -- provider/network failure reaches the agent as a tool error
         logger.warning("browser_handover: live view failed: %s", exc)
         return json.dumps({"success": False, "error_type": "live_view_failed",
                            "error": "The browser provider did not return the page. Try again once."})
@@ -154,8 +154,8 @@ def browser_handover(minutes: Any = None, task_id: Optional[str] = None) -> str:
 BROWSER_HANDOVER_SCHEMA = {
     "name": "browser_handover",
     "description": (
-        "Hand the current browser page to the user so they finish a step themselves on their phone, "
-        "typically paying on a checkout page or solving a human check. Call it once you reached that page "
+        "Hand the current browser page to the user. They finish a step on their phone, typically paying "
+        "on a checkout page or solving a human check. Call it once you reached that page "
         "and told the user what they will pay. The page stays open for the user, then closes."
     ),
     "parameters": {
@@ -177,7 +177,7 @@ def _check_handover_available() -> bool:
     from tools import browser_session_cloud as _cloud
     try:
         provider = _cloud.get_cloud_provider()
-    except Exception:
+    except Exception:  # health: allow BLE001 -- availability probe: any provider failure means no tool
         return False
     return provider is not None and hasattr(provider, "live_view")
 

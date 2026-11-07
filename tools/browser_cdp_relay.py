@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _HEAD_LIMIT = 64 * 1024
 _CONNECT_TIMEOUT = 15
-_relays: dict[tuple[str, str, int], "_Relay"] = {}
+_relays: dict[tuple[str, str, int], _Relay] = {}
 _relays_lock = threading.Lock()
 
 
@@ -84,7 +84,7 @@ class _Relay:
             upstream = self._open_upstream()
             upstream.sendall(_rewrite_host(head, self.host, self.port, self.scheme))
             _pipe(client, upstream)
-        except Exception as exc:  # one failed connection must not kill the listener
+        except Exception as exc:  # health: allow BLE001 -- one failed connection must not kill the listener
             logger.warning("CDP relay to %s:%s failed: %s", self.host, self.port, exc)
             for sock in (client, upstream):
                 if sock is not None:
