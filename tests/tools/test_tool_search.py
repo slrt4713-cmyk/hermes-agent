@@ -441,6 +441,35 @@ class TestBridgeDispatch:
         assert err is not None
 
 
+    def test_resolve_underlying_call_accepts_the_hyphenated_mcp_server_key(self):
+        """Loic, 2026-11-10: the agent wrote mcp__m365-accueil__..., the server key as configured;
+        the registry holds the sanitized mcp__m365_accueil__... and the call was refused."""
+        from tools.registry import registry
+        from tools.tool_search import resolve_underlying_call
+
+        name = "mcp__m365_accueil__list_mail_messages"
+        registry.register(
+            name=name,
+            handler=lambda args, **kwargs: "{}",
+            schema=_td(name, "List mail messages of the accueil mailbox."),
+            toolset="mcp-m365-accueil",
+        )
+        try:
+            resolved, args, err = resolve_underlying_call({
+                "name": "mcp__m365-accueil__list_mail_messages",
+                "arguments": {"top": 5},
+            })
+            assert err is None
+            assert resolved == name
+            assert args == {"top": 5}
+            _resolved, _args, err = resolve_underlying_call({
+                "name": "mcp__m365-other__list_mail_messages",
+                "arguments": {},
+            })
+            assert err is not None and "is not a known tool name" in err
+        finally:
+            registry.deregister(name)
+
     def test_resolve_underlying_call_rejects_recursion(self):
         """tool_call cannot invoke tool_call itself."""
         from tools.tool_search import resolve_underlying_call, TOOL_CALL_NAME
