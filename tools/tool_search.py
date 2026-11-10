@@ -25,7 +25,8 @@ from tools.tool_search_catalog import (
     CatalogEntry, _fn, _listing_group_label, _registry_entry, _registry_toolset,
     build_catalog, build_catalog_listing_with_form, search_catalog)
 from tools.tool_search_validation import (
-    local_batch_error, normalize_tool_call_entries, not_deferrable_error, session_unavailable_error,
+    canonical_mcp_tool_name, local_batch_error, normalize_tool_call_entries, not_deferrable_error,
+    session_unavailable_error,
     unavailable_in_session_reason, validate_deferred_call_args)
 from tools.connectors import CONNECTOR_BATCH_SENTINEL, is_connector_name
 from tools.connectors.search import (
@@ -631,8 +632,14 @@ def resolve_underlying_call(args: dict[str, Any], session_tool_names: Optional[I
     unavailable = session_unavailable_error(name, session_tool_names)
     if unavailable:
         return None, {}, unavailable
-    if not is_deferrable_tool_name(name, load_config_readonly().effective_defer_tools):
-        return None, {}, not_deferrable_error(name, session_tool_names)
+    defer_tools = load_config_readonly().effective_defer_tools
+    if not is_deferrable_tool_name(name, defer_tools):
+        # Registered MCP names are sanitized (``m365-accueil`` server -> ``mcp__m365_accueil__``),
+        # but models often write the server key as configured, with its hyphen.
+        alias = canonical_mcp_tool_name(name)
+        if alias == name or not is_deferrable_tool_name(alias, defer_tools):
+            return None, {}, not_deferrable_error(name, session_tool_names)
+        name = alias
     return name, raw_args, None
 
 

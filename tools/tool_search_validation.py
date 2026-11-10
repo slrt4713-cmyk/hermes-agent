@@ -210,6 +210,14 @@ def local_batch_error(entries: list[dict[str, Any]]) -> str:
     )
 
 
+def canonical_mcp_tool_name(name: str) -> str:
+    """The registry form of an ``mcp__`` name: every char outside ``[A-Za-z0-9_]`` becomes ``_``,
+    as ``sanitize_mcp_name_component`` does at registration. Other names come back unchanged."""
+    if not name.startswith("mcp__"):
+        return name
+    return re.sub(r"[^A-Za-z0-9_]", "_", name)
+
+
 def unavailable_in_session_reason(name: str) -> str:
     """Why a registered tool absent from THIS session cannot be reached, whatever its door.
 
