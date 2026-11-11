@@ -1,7 +1,29 @@
 import json
 from unittest.mock import patch
 
-from hermes_cli.codex_models import DEFAULT_CODEX_MODELS, get_codex_model_ids
+from hermes_cli.codex_models import (
+    DEFAULT_CODEX_MODELS,
+    get_codex_model_ids,
+    get_codex_model_options,
+)
+
+
+def test_model_options_keep_only_efforts_supported_by_hermes(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.codex_models._fetch_model_entries_from_api",
+        lambda _token: [{
+            "slug": "gpt-5.6-sol",
+            "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "high"},
+                {"effort": "max"},
+            ],
+        }],
+    )
+
+    assert get_codex_model_options("token") == [
+        {"id": "gpt-5.6-sol", "reasoning_efforts": ["low", "high"]}
+    ]
 
 
 def test_get_codex_model_ids_prioritizes_default_and_cache(tmp_path, monkeypatch):

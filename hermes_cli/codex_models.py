@@ -79,8 +79,8 @@ def _add_forward_compat_models(model_ids: List[str]) -> List[str]:
     return ordered
 
 
-def _fetch_models_from_api(access_token: str) -> List[str]:
-    """Fetch available models from the Codex API. Returns visible models sorted by priority."""
+def _fetch_model_entries_from_api(access_token: str) -> list[dict]:
+    """Fetch visible Codex models with their account-specific capabilities."""
     try:
         import httpx
         resp = httpx.get(
@@ -113,10 +113,32 @@ def _fetch_models_from_api(access_token: str) -> List[str]:
             continue
         priority = item.get("priority")
         rank = int(priority) if isinstance(priority, (int, float)) else 10_000
-        sortable.append((rank, slug))
+        sortable.append((rank, slug, item))
 
     sortable.sort(key=lambda x: (x[0], x[1]))
-    return _add_forward_compat_models([slug for _, slug in sortable])
+    return [item for _, _, item in sortable]
+
+
+def _fetch_models_from_api(access_token: str) -> List[str]:
+    """Fetch available models from the Codex API, including compatibility IDs."""
+    return _add_forward_compat_models(
+        [item["slug"] for item in _fetch_model_entries_from_api(access_token)]
+    )
+
+
+def get_codex_model_options(access_token: str) -> list[dict[str, object]]:
+    """Return live models and supported effort levels for an OAuth account."""
+    supported_by_hermes = {"low", "medium", "high", "xhigh"}
+    result = []
+    for item in _fetch_model_entries_from_api(access_token):
+        levels = item.get("supported_reasoning_levels") or []
+        efforts = [
+            level.get("effort") for level in levels
+            if isinstance(level, dict)
+            and level.get("effort") in supported_by_hermes
+        ]
+        result.append({"id": item["slug"], "reasoning_efforts": efforts})
+    return result
 
 
 def _read_default_model(codex_home: Path) -> Optional[str]:

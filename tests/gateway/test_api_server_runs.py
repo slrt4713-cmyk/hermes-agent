@@ -10,6 +10,7 @@ Covers:
 
 import asyncio
 import threading
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,6 +45,7 @@ def _create_runs_app(adapter: APIServerAdapter) -> web.Application:
     mws = [mw for mw in (cors_middleware, security_headers_middleware) if mw is not None]
     app = web.Application(middlewares=mws)
     app["api_server_adapter"] = adapter
+    app.router.add_get("/v1/run-options", adapter._handle_run_options)
     app.router.add_post("/v1/runs", adapter._handle_runs)
     app.router.add_get("/v1/runs/{run_id}", adapter._handle_get_run)
     app.router.add_get("/v1/runs/{run_id}/events", adapter._handle_run_events)
@@ -99,6 +101,193 @@ def auth_adapter():
 
 
 class TestStartRun:
+    def test_agent_creation_applies_run_controls(self, adapter):
+        with ExitStack() as stack:
+            for target, value in (
+                ("gateway.run._resolve_runtime_agent_kwargs", {"provider": "deepseek", "api_key": "deepseek-key"}),
+                ("gateway.run._resolve_gateway_model", "deepseek-v4-flash"),
+                ("gateway.run._load_gateway_config", {}),
+                ("gateway.run._current_max_iterations", 5),
+                ("gateway.run.GatewayRunner._load_reasoning_config", {"enabled": True, "effort": "medium"}),
+                ("gateway.run.GatewayRunner._load_fallback_model", {"provider": "deepseek"}),
+                ("hermes_cli.tools_config._get_platform_tools", set()),
+                ("hermes_cli.runtime_provider.resolve_runtime_provider", {
+                    "provider": "openai-codex",
+                    "api_key": "codex-key",
+                    "api_mode": "codex_responses",
+                }),
+            ):
+                stack.enter_context(patch(target, return_value=value))
+            agent_class = stack.enter_context(patch("run_agent.AIAgent"))
+            adapter._create_agent(
+                model_override="gpt-6-astra",
+                reasoning_effort_override="high",
+            )
+        assert agent_class.call_args.kwargs["model"] == "gpt-6-astra"
+        assert agent_class.call_args.kwargs["provider"] == "openai-codex"
+        assert agent_class.call_args.kwargs["fallback_model"] is None
+        assert agent_class.call_args.kwargs["reasoning_config"] == {
+            "enabled": True,
+            "effort": "high",
+        }
+
+    @pytest.mark.asyncio
+    async def test_run_options_require_auth(self, auth_adapter):
+        app = _create_runs_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/v1/run-options")
+        assert resp.status == 401
+
+    @pytest.mark.asyncio
+    async def test_run_options_show_available_models(self, auth_adapter):
+        app = _create_runs_app(auth_adapter)
+        options = {
+            "current_model": "gpt-5.6-sol",
+            "models": ["gpt-5.6-sol", "gpt-6-astra"],
+            "current_reasoning_effort": "medium",
+            "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+            "reasoning_efforts_by_model": {
+                "gpt-5.6-sol": ["low", "medium", "high", "xhigh"],
+                "gpt-6-astra": ["low", "medium", "high", "xhigh"],
+            },
+        }
+        with patch.object(auth_adapter, "_run_control_options", return_value=options):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get(
+                    "/v1/run-options",
+                    headers={"Authorization": "Bearer sk-secret"},
+                )
+                assert resp.status == 200
+                assert await resp.json() == options
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_unavailable_model_without_allocating_run(self, adapter):
+        app = _create_runs_app(adapter)
+        with patch.object(adapter, "_run_control_options", return_value={
+            "current_model": "gpt-5.6-sol",
+            "models": ["gpt-5.6-sol"],
+            "current_reasoning_effort": "medium",
+            "reasoning_efforts": ["low", "medium", "high"],
+            "reasoning_efforts_by_model": {"gpt-5.6-sol": ["low", "medium", "high"]},
+        }):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "hello", "agent_model": "unapproved-model"},
+                )
+        assert resp.status == 400
+        assert adapter._run_streams == {}
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_unavailable_reasoning_effort(self, adapter):
+        app = _create_runs_app(adapter)
+        with patch.object(adapter, "_run_control_options", return_value={
+            "current_model": "gpt-5.6-sol",
+            "models": ["gpt-5.6-sol"],
+            "current_reasoning_effort": "medium",
+            "reasoning_efforts": ["low", "medium", "high"],
+            "reasoning_efforts_by_model": {"gpt-5.6-sol": ["low", "medium", "high"]},
+        }):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={"input": "hello", "reasoning_effort": "max"},
+                )
+        assert resp.status == 400
+        assert adapter._run_streams == {}
+
+    @pytest.mark.asyncio
+    async def test_start_rejects_effort_unsupported_by_selected_model(self, adapter):
+        app = _create_runs_app(adapter)
+        with patch.object(adapter, "_run_control_options", return_value={
+            "current_model": "gpt-5.6-sol",
+            "models": ["gpt-5.6-sol", "limited-model"],
+            "current_reasoning_effort": "medium",
+            "reasoning_efforts": ["low", "medium", "high"],
+            "reasoning_efforts_by_model": {
+                "gpt-5.6-sol": ["low", "medium", "high"],
+                "limited-model": ["low"],
+            },
+        }):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "input": "hello",
+                        "agent_model": "limited-model",
+                        "reasoning_effort": "high",
+                    },
+                )
+        assert resp.status == 400
+        assert adapter._run_streams == {}
+
+    @pytest.mark.asyncio
+    async def test_start_passes_selected_controls_to_agent(self, adapter):
+        app = _create_runs_app(adapter)
+        options = {
+            "current_model": "gpt-5.6-sol",
+            "models": ["gpt-5.6-sol", "gpt-6-astra"],
+            "current_reasoning_effort": "medium",
+            "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+            "reasoning_efforts_by_model": {
+                "gpt-5.6-sol": ["low", "medium", "high", "xhigh"],
+                "gpt-6-astra": ["low", "medium", "high", "xhigh"],
+            },
+        }
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "done"}
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        with patch.object(adapter, "_run_control_options", return_value=options):
+            with patch.object(adapter, "_create_agent", return_value=mock_agent) as create:
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={
+                            "input": "hello",
+                            "agent_model": "gpt-6-astra",
+                            "reasoning_effort": "high",
+                        },
+                    )
+                    assert response.status == 202
+                    for _ in range(50):
+                        if create.called:
+                            break
+                        await asyncio.sleep(0.01)
+        assert create.call_args.kwargs["model_override"] == "gpt-6-astra"
+        assert create.call_args.kwargs["reasoning_effort_override"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_start_can_return_to_a_non_codex_default(self, adapter):
+        app = _create_runs_app(adapter)
+        options = {
+            "current_model": "deepseek-v4-flash",
+            "models": ["deepseek-v4-flash", "gpt-6-astra"],
+            "current_reasoning_effort": "medium",
+            "reasoning_efforts": [],
+            "reasoning_efforts_by_model": {
+                "deepseek-v4-flash": [],
+                "gpt-6-astra": ["low", "medium", "high"],
+            },
+        }
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "done"}
+        with patch.object(adapter, "_run_control_options", return_value=options):
+            with patch.object(adapter, "_create_agent", return_value=mock_agent) as create:
+                async with TestClient(TestServer(app)) as cli:
+                    response = await cli.post(
+                        "/v1/runs",
+                        json={"input": "hello", "agent_model": "deepseek-v4-flash"},
+                    )
+                    assert response.status == 202
+                    for _ in range(50):
+                        if create.called:
+                            break
+                        await asyncio.sleep(0.01)
+        assert create.call_args.kwargs["model_override"] == "deepseek-v4-flash"
+        assert create.call_args.kwargs["reasoning_effort_override"] is None
+
     @pytest.mark.asyncio
     async def test_start_returns_202(self, adapter):
         app = _create_runs_app(adapter)
