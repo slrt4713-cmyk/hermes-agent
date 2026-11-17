@@ -1246,7 +1246,7 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
 
 
 def _fast_mode_route_supported(
-    model_id: Optional[str], provider: Optional[str], base_url: Optional[str]) -> bool:
+    model_id: Optional[str], provider: Optional[str], base_url: Optional[str], tier: Optional[str] = None) -> bool:
     """Only the first-party endpoint that bills for fast mode may receive its params."""
     from urllib.parse import urlparse
 
@@ -1288,7 +1288,7 @@ def resolve_fast_mode_overrides(
     never see the params. Single fast-mode gate for ``/fast`` and ``agent.fast_mode`` windows."""
     if not model_supports_fast_mode(model_id):
         return None
-    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
+    if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url, tier):
         return None
     if tier == "ultrafast":
         return {"service_tier": "ultrafast"} if model_supports_ultrafast(model_id) else None
