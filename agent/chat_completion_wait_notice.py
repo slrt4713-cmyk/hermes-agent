@@ -45,7 +45,7 @@ def codex_watchdog_deadline(*, stale_timeout: float, ttfb_enabled: bool, ttfb_ti
     last_event_ts: Optional[float], last_progress_ts: Optional[float],
     retry_started_ts: Optional[float], call_start: float, idle_enabled: bool,
     idle_timeout: float, idle_requires_progress: bool, elapsed: float,
-    progress_timeout: float = 0.0) -> Optional[tuple[str, float]]:
+    progress_timeout: float = 0.0, progress_stall_timeout: float = 0.0) -> Optional[tuple[str, float]]:
     """Earliest enabled Codex watchdog as ``(label, seconds_until_it_fires)``; None when
     none applies (disabled/infinite, or its deadline already passed)."""
     deadlines: list[tuple[str, float]] = []
@@ -59,6 +59,8 @@ def codex_watchdog_deadline(*, stale_timeout: float, ttfb_enabled: bool, ttfb_ti
         deadlines.append(("first progress", attempt_offset + progress_timeout))
     elif (not idle_requires_progress or last_progress_ts is not None) and idle_enabled and math.isfinite(idle_timeout):
         deadlines.append(("stream idle", max(0.0, last_event_ts - call_start) + idle_timeout))
+    if progress_stall_timeout > 0 and last_progress_ts is not None:
+        deadlines.append(("model silence", max(0.0, last_progress_ts - call_start) + progress_stall_timeout))
     if not deadlines:
         return None
     label, deadline = min(deadlines, key=lambda d: d[1])

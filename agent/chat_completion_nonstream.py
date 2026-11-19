@@ -3,6 +3,11 @@
 from agent import chat_completion_helpers as h
 from agent import chat_completion_wait_notice as wn
 
+# Kills closer together than this (one wedge, several watchdogs) share one retry notice.
+_WEDGE_NOTICE_INTERVAL = 60.0
+# Replies at least this long log their longest model silence.
+_SILENCE_LOG_MIN_SECONDS = 60.0
+
 
 class _NonStreamRequest:
     """One non-streaming request on a worker thread, polled by the caller.
@@ -40,6 +45,9 @@ class _NonStreamRequest:
             else None
         )
         self.call_start = h.time.time()
+        # Longest gap between two pieces of model output, seen by the poll loop (for tuning the
+        # model-silence watchdog on real traffic).
+        self.longest_model_silence = 0.0
         self.wait_notice_started_ts = None
         self.wait_notice = wn.WaitNoticeState()
         self.thread = None
@@ -171,7 +179,7 @@ class _NonStreamRequest:
                 retry_started_ts=retry_started_ts,
                 call_start=self.call_start, idle_enabled=wd.idle_enabled, idle_timeout=wd.idle_timeout,
                 idle_requires_progress=wd.idle_requires_progress, progress_timeout=wd.progress_timeout,
-                elapsed=elapsed)
+                progress_stall_timeout=getattr(wd, "progress_stall_timeout", 0.0), elapsed=elapsed)
             # One neutral notice per silence; repeating it every heartbeat made
             # healthy long calls read as provider trouble (#92550).
             if not self.wait_notice.should_emit(phase, watchdog):
@@ -196,6 +204,7 @@ class _NonStreamRequest:
             f"⚠️ No first stream event from provider in {int(elapsed)}s (codex stream, model: {self._model()}). "
             f"Reconnecting." + (f" {silent_hint}" if silent_hint else ""))
         self._abort_request("codex_ttfb_kill")
+        self._notify_wedge_retry()
         agent._emit_diagnostic_wait(f"⚠ no response from provider in {int(elapsed)}s — reconnecting...")
         agent._touch_activity(f"codex stream killed after {int(elapsed)}s with no first stream event")
         self._await_worker_after_kill(
@@ -213,10 +222,55 @@ class _NonStreamRequest:
             f"⚠️ Codex stream opened but made no model progress for {int(elapsed)}s "
             f"(model: {self._model()}). Reconnecting.")
         self._abort_request("codex_progress_kill")
+        self._notify_wedge_retry()
         agent._touch_activity(f"codex stream killed after {int(elapsed)}s without model progress")
         self._await_worker_after_kill(
             f"Codex stream produced no substantive model progress for {int(elapsed)}s "
             f"(progress threshold: {int(wd.progress_timeout)}s)")
+
+    def _notify_wedge_retry(self) -> None:
+        """Tell the person waiting that an official-Codex call is being retried; kills within
+        ``_WEDGE_NOTICE_INTERVAL`` seconds of the last notice share it."""
+        if not getattr(self.wd, "official_codex", False):
+            return
+        agent, now = self.agent, h.time.time()
+        last = getattr(agent, "_codex_wedge_notice_at", None)
+        if isinstance(last, (int, float)) and now - last < _WEDGE_NOTICE_INTERVAL:
+            return
+        # A notice must never break the kill path that called it.
+        with h.contextlib.suppress(Exception):
+            from agent.i18n import t
+            agent._emit_status(t("display.notice.codex_wedge_retry"))
+            agent._codex_wedge_notice_at = now
+
+    def _progress_stall_kill(self, stall_elapsed: float, event_elapsed) -> None:
+        """Model progress began, then stopped while lifecycle/keepalive frames kept the
+        transport alive: reconnect instead of waiting out the wall-clock stale timeout."""
+        agent, wd = self.agent, self.wd
+        h.logger.warning("Codex stream made no model progress for %.0fs after progress began "
+            "(threshold %.0fs, last SSE event %s, model=%s, context=~%s tokens). Reconnecting.",
+            stall_elapsed, wd.progress_stall_timeout,
+            f"{event_elapsed:.0f}s ago" if event_elapsed is not None else "never",
+            self._model(), f"{wd.est_tokens:,}")
+        agent._buffer_diagnostic_status(
+            f"⚠️ Codex stopped producing output for {int(stall_elapsed)}s "
+            f"(model: {self._model()}). Reconnecting.")
+        self._abort_request("codex_progress_stall_kill")
+        # One silence kill per reply: the resend runs without this watchdog.
+        agent._codex_progress_stall_cut_at = h.time.time()
+        self._notify_wedge_retry()
+        agent._touch_activity(f"codex stream killed after {int(stall_elapsed)}s without new model output")
+        self._await_worker_after_kill(
+            f"Codex stream made no model progress for {int(stall_elapsed)}s after progress began "
+            f"(progress stall threshold: {int(wd.progress_stall_timeout)}s)")
+
+    def _log_model_silence(self) -> None:
+        """One line per long official-Codex reply: how long the model stayed silent at most."""
+        elapsed = h.time.time() - self.call_start
+        if getattr(self.wd, "official_codex", False) and elapsed >= _SILENCE_LOG_MIN_SECONDS:
+            h.logger.info("Codex call finished in %.0fs; longest model silence after progress began %.0fs "
+                "(model=%s, context=~%s tokens).", elapsed, self.longest_model_silence, self._model(),
+                f"{self.wd.est_tokens:,}")
 
     def _idle_kill(self, event_stale_elapsed: float) -> None:
         """SSE events stopped after the phase-specific idle arm point.
@@ -235,6 +289,7 @@ class _NonStreamRequest:
             f"⚠️ Codex stream sent no events for {int(event_stale_elapsed)}s after {arm_point} "
             f"(model: {self._model()}). Reconnecting.")
         self._abort_request("codex_stream_idle_kill")
+        self._notify_wedge_retry()
         agent._touch_activity(f"codex stream killed after {int(event_stale_elapsed)}s with no SSE events")
         self._await_worker_after_kill(
             f"Codex stream produced no SSE events for {int(event_stale_elapsed)}s "
@@ -258,6 +313,10 @@ class _NonStreamRequest:
                 wd.idle_timeout,
             )
         self._abort_request("stale_call_kill")
+        if getattr(wd, "interactive_cap", False):
+            # The resend gets the full floor: a genuinely long answer must not be cut twice.
+            agent._codex_interactive_cap_cut_at = h.time.time()
+        self._notify_wedge_retry()
         h._bump_stale_streak(agent)
         h._touch_stale_kill_activity(agent, elapsed)
         self._await_worker_after_kill(
@@ -311,6 +370,13 @@ class _NonStreamRequest:
                     and attempt_elapsed > wd.progress_timeout):
                 self._progress_kill(attempt_elapsed)
                 break
+            if last_progress_ts is not None:
+                self.longest_model_silence = max(self.longest_model_silence, now - last_progress_ts)
+            # getattr: wait-notice tests drive this loop with SimpleNamespace watchdogs.
+            stall_timeout = getattr(wd, "progress_stall_timeout", 0.0)
+            if stall_timeout > 0 and last_progress_ts is not None and now - last_progress_ts > stall_timeout:
+                self._progress_stall_kill(now - last_progress_ts, now - last_event_ts if last_event_ts else None)
+                break
             idle_elapsed = now - last_event_ts if last_event_ts is not None else None
             if (retry_started_ts is None and wd.idle_enabled and idle_elapsed is not None
                     and (not wd.idle_requires_progress or last_progress_ts is not None)
@@ -326,5 +392,6 @@ class _NonStreamRequest:
             raise self.result["error"]
         # Success — the provider proved responsive: clear the breaker (#58962).
         if self.result["response"] is not None:
+            self._log_model_silence()
             h._reset_stale_streak(agent)
         return self.result["response"]

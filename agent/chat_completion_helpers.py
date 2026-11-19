@@ -1131,6 +1131,26 @@ HIGH_EFFORT_SILENCE_FLOOR_SECONDS = 300.0
 # retune the other.
 CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS = 300.0
 
+# Model-silence budget once an official-Codex stream HAS made progress: the backend can stop
+# producing output mid-answer while keepalive frames keep the transport (and the event-idle
+# watchdog) alive, so only the wall-clock stale floor (up to 1200s) ended such a stream and an
+# unchanged resend could wedge the same way. A fresh connection answered in seconds in every
+# observed case. Floored by the high-effort silence floor. HERMES_CODEX_PROGRESS_STALL_SECONDS
+# overrides (0 disables).
+CODEX_PROGRESS_STALL_TIMEOUT_SECONDS = 180.0
+# After a model-silence kill the resend runs without this watchdog for CODEX_CAP_COOLDOWN_SECONDS:
+# a model that was really working silently loses one attempt, never loops.
+
+# Wall-clock ceiling for one worker-thread (interactive) official-Codex call, applied by
+# _resolve_nonstream_watchdogs after the large-context floor: a person is waiting, and a healthy
+# call took at most ~4 min in production. Raised to twice the high-effort silence floor at high
+# effort and above. Not applied when the stale timeout is explicit (provider config or
+# HERMES_API_CALL_STALE_TIMEOUT), nor for CODEX_CAP_COOLDOWN_SECONDS after a call was cut by this
+# cap (a genuinely long answer then gets the floor on its resend). The inline path (cron,
+# delegated children) never sees it. HERMES_CODEX_CALL_MAX_SECONDS overrides (0 disables).
+CODEX_INTERACTIVE_CALL_MAX_SECONDS = 300.0
+CODEX_CAP_COOLDOWN_SECONDS = 600.0
+
 
 def _high_effort_silence_floor(agent) -> float:
     """``HIGH_EFFORT_SILENCE_FLOOR_SECONDS`` when the wire reasoning config is enabled at ``high`` or any
@@ -1158,6 +1178,9 @@ class _NonStreamWatchdogs:
     idle_timeout: float
     idle_requires_progress: bool
     progress_timeout: float = 0.0
+    progress_stall_timeout: float = 0.0
+    interactive_cap: bool = False   # stale_timeout was lowered by the interactive Codex ceiling
+    official_codex: bool = False    # official OpenAI Codex backend (retry notice to the user)
 
 
 def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs:
@@ -1190,6 +1213,11 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
     if codex and not local:
         codex_floor = openai_codex_stale_timeout_floor(est_tokens)
         stale_timeout = _bound_openai_codex_stale_timeout(stale_timeout, est_tokens)
+    official_codex = codex and openai_codex_backend and not local
+    interactive_cap = False
+    if official_codex:
+        capped = _cap_interactive_codex_call(agent, stale_timeout, effort_floor)
+        interactive_cap, stale_timeout = capped < stale_timeout, capped
 
     idle_default = max(effort_floor, next(
         (default for threshold, default in ((100_000, 180.0), (50_000, 120.0), (10_000, 60.0)) if est_tokens > threshold),
@@ -1240,12 +1268,54 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
     idle_explicit = env_float("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS", -1.0) != -1.0
     idle_timeout = env_float("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS", idle_default)
     progress_gated = codex and openai_codex_backend and codex_floor > 0 and not idle_explicit
+    # Phase-aware requests only: their stream retry resets last_progress_ts, so the silence is
+    # always measured on the current physical attempt.
+    progress_stall_timeout = (_codex_progress_stall_timeout(agent, effort_floor)
+                              if official_codex and progress_gated else 0.0)
     return _NonStreamWatchdogs(stale_timeout=stale_timeout, codex=codex, est_tokens=est_tokens,
         ttfb_enabled=ttfb_enabled, ttfb_timeout=ttfb_timeout, idle_enabled=codex and idle_timeout > 0,
         idle_timeout=idle_timeout, idle_requires_progress=progress_gated,
         # A lifecycle frame proves transport liveness, not model progress. Bound that phase
         # from the physical-attempt start; events cannot restart the grace period.
-        progress_timeout=CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS if progress_gated else 0.0)
+        progress_timeout=CODEX_FIRST_PROGRESS_TIMEOUT_SECONDS if progress_gated else 0.0,
+        progress_stall_timeout=progress_stall_timeout, interactive_cap=interactive_cap,
+        official_codex=official_codex)
+
+
+def _env_seconds(name: str, default: float, effort_floor: float) -> float:
+    """``name`` from the environment (0 or less disables, returned as 0.0); the implicit default
+    is raised to ``effort_floor``, an explicit value is taken as is."""
+    explicit = env_float(name, -1.0) != -1.0
+    value = env_float(name, default)
+    if value <= 0:
+        return 0.0
+    return value if explicit else max(value, effort_floor)
+
+
+def _cap_interactive_codex_call(agent, stale_timeout: float, effort_floor: float) -> float:
+    """``stale_timeout`` bounded by the interactive ceiling, unless the stale timeout is explicit,
+    the ceiling is disabled, or this agent's last capped call was cut less than
+    ``CODEX_CAP_COOLDOWN_SECONDS`` ago."""
+    is_explicit = getattr(agent, "_stale_timeout_is_explicit", None)
+    if callable(is_explicit) and is_explicit():
+        return stale_timeout
+    if _recently_cut(agent, "_codex_interactive_cap_cut_at"):
+        return stale_timeout
+    cap = _env_seconds("HERMES_CODEX_CALL_MAX_SECONDS", CODEX_INTERACTIVE_CALL_MAX_SECONDS, 2.0 * effort_floor)
+    return min(stale_timeout, cap) if cap > 0 else stale_timeout
+
+
+def _recently_cut(agent, attribute: str) -> bool:
+    """True when ``agent.<attribute>`` holds a kill time less than ``CODEX_CAP_COOLDOWN_SECONDS`` old."""
+    last_cut = getattr(agent, attribute, None)
+    return isinstance(last_cut, (int, float)) and time.time() - last_cut < CODEX_CAP_COOLDOWN_SECONDS
+
+
+def _codex_progress_stall_timeout(agent, effort_floor: float) -> float:
+    """Model-silence budget after progress began; 0 disables, and 0 right after a silence kill."""
+    if _recently_cut(agent, "_codex_progress_stall_cut_at"):
+        return 0.0
+    return _env_seconds("HERMES_CODEX_PROGRESS_STALL_SECONDS", CODEX_PROGRESS_STALL_TIMEOUT_SECONDS, effort_floor)
 
 
 def _codex_silent_hang_hint(agent, api_kwargs: dict) -> Optional[str]:

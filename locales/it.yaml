@@ -3535,6 +3535,7 @@ display:
     aux_failure_label: "revisione in background"
   notice:
     uncompressed_context_overflow: "⚠️ Il contesto della sessione (~{tokens} token) supera la finestra di contesto del modello (~{context_length} token) con la compressione disattivata (compression.enabled: false). Usa /compact per comprimere la cronologia o attiva la compressione in config.yaml."
+    codex_wedge_retry: "Ci sta mettendo più del solito: rilancio la richiesta."
 explainer:
   no_reply_prefix: "⚠️ Nessuna risposta: "
   empty_response: "{model} non ha prodotto una risposta questa volta, nemmeno dopo i tentativi ripetuti. Invia `continue` per riprovare, oppure cambia modello con /model."
