@@ -2069,6 +2069,8 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
         # The agent's classified cause (agent.error_classifier.FailoverReason value) for the
         # failure-path planners: cron.unreachable_retry reads it.
         failure.failure_reason = result.get("failure_reason")
+        # When the provider's usage window reopens (epoch seconds): cron.quota_hold reads it.
+        failure.failure_resets_at = result.get("failure_resets_at")
         raise failure
     if max_iteration_summary:
         logger.warning(

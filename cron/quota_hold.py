@@ -35,6 +35,9 @@ HOLD_SLACK_SECONDS = 60
 
 _RETRY_AFTER_RE = re.compile(r"retry after (\d+)s", re.IGNORECASE)
 
+# A reset further away than one weekly window is not a usage window: ignore it.
+MAX_RESET_SECONDS = 8 * 24 * 3600
+
 
 def hold_seconds_from_failure(exc: BaseException) -> Optional[float]:
     """Seconds the provider said it will stay closed, or None when *exc* (or anything in its
@@ -54,7 +57,18 @@ def hold_seconds_from_failure(exc: BaseException) -> Optional[float]:
                 hint = float(m.group(1)) if m else None
             return float(hint) if hint is not None and float(hint) > 0 else None
         cur = cur.__cause__ or cur.__context__
-    return None
+    return _seconds_until_structured_reset(exc)
+
+
+def _seconds_until_structured_reset(exc: BaseException) -> Optional[float]:
+    """A failed agent turn carries the provider's reset instant as ``failure_resets_at``
+    (``cron.scheduler._final_response_from_result``). It is only set for limit failures
+    (``agent.turn_recovery._stamp_limit_reset``, usage-window refusals), never from free text."""
+    resets_at = getattr(exc, "failure_resets_at", None)
+    if not isinstance(resets_at, (int, float)) or isinstance(resets_at, bool):
+        return None
+    remaining = float(resets_at) - _hermes_now().timestamp()
+    return remaining if 0 < remaining <= MAX_RESET_SECONDS else None
 
 
 def hold_active(job: dict[str, Any], now: Optional[datetime] = None) -> bool:

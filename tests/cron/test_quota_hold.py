@@ -175,3 +175,46 @@ def test_quota_hold_parks_past_window_survives_stale_rearm_and_clears_on_model_r
     j = update_job(job_id, {"schedule": "every 15m"})
     assert qh.STATE_KEY not in j
     assert datetime.fromisoformat(j["next_run_at"]) - now < timedelta(hours=1)
+
+
+def test_hold_seconds_from_structured_reset_on_failed_turn(monkeypatch):
+    """A failed agent turn raises RuntimeError carrying ``failure_resets_at`` (Codex usage limit
+    as 'HTTP 429: The usage limit has been reached'): the hold uses it; a past, absurd or
+    non-numeric reset does not park the job."""
+    now = datetime(2026, 11, 20, 12, 22, tzinfo=UTC)
+    monkeypatch.setattr(qh, "_hermes_now", lambda: now)
+    failure = RuntimeError("HTTP 429: The usage limit has been reached")
+    failure.failure_resets_at = now.timestamp() + 2 * 3600
+    assert qh.hold_seconds_from_failure(failure) == 2 * 3600
+    for bad in (now.timestamp() - 60, now.timestamp() + 30 * 24 * 3600, True, "soon", None):
+        failure.failure_resets_at = bad
+        assert qh.hold_seconds_from_failure(failure) is None
+
+
+def test_final_response_failure_carries_reset_instant():
+    failed = {"failed": True, "completed": False, "error": "HTTP 429: The usage limit has been reached",
+              "failure_reason": "rate_limit", "failure_resets_at": 1_800_000_000.0}
+    with pytest.raises(RuntimeError) as raised:
+        sched._final_response_from_result(failed, "job", "meeting-prep-14h", None)
+    assert raised.value.failure_resets_at == 1_800_000_000.0
+    assert qh.hold_seconds_from_failure(RuntimeError("HTTP 429: The usage limit has been reached")) is None
+
+
+def test_quota_window_wins_over_unreachable_ladder_for_weekday_job(tmp_cron_home, monkeypatch):
+    """A weekday 14:00 job hit the usage limit at 14:22 (reset 16:18). The
+    unreachable ladder re-ran it every 30 min inside the window, then parked it until Monday.
+    With the reset known, the job runs once right after the window instead."""
+    created = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
+    now = datetime(2026, 11, 20, 14, 22, tzinfo=UTC)
+    monkeypatch.setattr("cron.jobs._hermes_now", lambda: created)
+    job = create_job("meeting-prep-14h", "0 14 * * 1-5")
+    monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+    monkeypatch.setattr(qh, "_hermes_now", lambda: now)
+    monkeypatch.setattr("cron.unreachable_retry._hermes_now", lambda: now)
+    hold = 116 * 60
+    assert mark_job_run(job["id"], False, "HTTP 429: The usage limit has been reached",
+                        model_unreachable=True, quota_hold_seconds=hold, recover_consumed_fire=True)
+    held = get_job(job["id"])
+    assert datetime.fromisoformat(held["next_run_at"]) == now + timedelta(
+        seconds=hold + qh.HOLD_SLACK_SECONDS)
+    assert qh.is_recovery_fire(held, held["next_run_at"])

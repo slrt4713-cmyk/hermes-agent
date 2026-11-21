@@ -2542,7 +2542,8 @@ def mark_job_run(
         from cron import quota_hold
         from cron.unreachable_retry import clear_state, plan_retry
 
-        if not success and model_unreachable and not is_terminal_job(job):
+        if not success and model_unreachable and not quota_hold_seconds and not is_terminal_job(job):
+            # A known quota window wins: re-runs inside it fail the same way (cron/quota_hold.py).
             plan_retry(job)
         else:
             # Any run that reached the model (either outcome) resets the re-run ladder.
