@@ -102,7 +102,8 @@ def test_published_tiers_price_the_served_request_not_the_subscription(monkeypat
             ultra = pricing.estimate_usage_cost(f"openai/{model}", served, provider="openai-api")
             assert ultra.amount_usd == expected * multiplier
             assert pricing.estimate_usage_cost(model, served, provider="openai-codex").status == "included"
-    for host in ("api.openai.com", "us.api.openai.com", "eu.api.openai.com"):
+    # Fork: regional OpenAI hosts (models_fast_regions) are not carried; global host only.
+    for host in ("api.openai.com",):
         route = {"provider": "openai-api", "base_url": f"https://{host}/v1"}
         assert resolve_fast_mode_overrides(model, **route) == {"service_tier": "priority"}
         ultra = resolve_fast_mode_overrides(model, tier="ultrafast", **route)
